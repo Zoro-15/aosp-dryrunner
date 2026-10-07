@@ -135,7 +135,28 @@ fi
 # 10. Execute Target & Capture Errors
 echo "--> Executing target: $TARGET"
 set +e
-if [ "$TARGET" = "nothing" ]; then
+BUILD_STATUS=0
+if [ "$TARGET" = "all-sequential" ]; then
+    echo "--> Running all error-probing targets sequentially in fast-fail order..."
+    for SUB_TARGET in "nothing" "selinux_policy" "bootimage" "vendorimage"; do
+        echo ""
+        echo "====================================================================="
+        echo " [STAGE] Probing Target: $SUB_TARGET"
+        echo "====================================================================="
+        if [ "$SUB_TARGET" = "nothing" ]; then
+            m nothing -j$(nproc --all) 2>&1 | tee -a build_a16_PL2.log
+        else
+            mka "$SUB_TARGET" -j$(nproc --all) 2>&1 | tee -a build_a16_PL2.log
+        fi
+        STAGE_STATUS=${PIPESTATUS[0]}
+        if [ $STAGE_STATUS -ne 0 ]; then
+            echo "[!] Stage $SUB_TARGET failed with exit code $STAGE_STATUS!"
+            BUILD_STATUS=$STAGE_STATUS
+            break
+        fi
+        echo "[✓] Stage $SUB_TARGET passed!"
+    done
+elif [ "$TARGET" = "nothing" ]; then
     echo "--> Probing Soong analysis, Blueprint syntax & SEPolicy graph (m nothing)..."
     m nothing -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
     BUILD_STATUS=${PIPESTATUS[0]}
