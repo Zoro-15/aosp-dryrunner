@@ -171,10 +171,11 @@ def restore(build_root: Path, store, tag: str) -> bool:
     except Exception as e:
         log.warn(f"unpacking out state from {tag} failed: {e}")
         return False
-    # Clean stale temporary directory inside out/soong
-    soong_temp = dest / "soong" / ".temp"
-    if soong_temp.exists():
-        shutil.rmtree(soong_temp, ignore_errors=True)
+    # Clean stale temporary and bootstrap directories inside out/soong
+    for soong_stale in (".temp", ".minibootstrap", ".bootstrap", ".glob"):
+        p = dest / "soong" / soong_stale
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
     # Ensure host tool binaries retain execution bit
     for b_dir in (dest / "soong" / "host" / "linux-x86" / "bin",
                  dest / "host" / "linux-x86" / "bin"):

@@ -187,6 +187,28 @@ def _mount_vol(img: Path, mnt: Path) -> bool:
     return True
 
 
+def _ensure_canonical_link(base: Path, build_root: Path) -> None:
+    """Ensure legacy path <base>/aosp points to <vol_mnt>/aosp.
+
+    Ninja / Soong / prebuilts from previous runs (or legacy states) often bake
+    the absolute path /mnt/romforge/aosp into .minibootstrap or ninja deps.
+    Having /mnt/romforge/aosp symlinked to /mnt/romforge/vol/aosp ensures 100%
+    path backwards compatibility across both plain and btrfs storage modes.
+    """
+    canonical_link = base / BUILD_DIR_NAME
+    if canonical_link == build_root:
+        return
+    try:
+        if canonical_link.is_symlink() or not canonical_link.exists():
+            canonical_link.unlink(missing_ok=True)
+            canonical_link.symlink_to(build_root)
+        elif canonical_link.is_dir() and not any(canonical_link.iterdir()):
+            canonical_link.rmdir()
+            canonical_link.symlink_to(build_root)
+    except Exception as e:
+        log.warn(f"Failed to create canonical symlink {canonical_link} -> {build_root}: {e}")
+
+
 def ensure_volume(force: bool = False) -> VolumeState:
     """Idempotent: mount (or reuse) the compressed build volume.
 
@@ -205,6 +227,7 @@ def ensure_volume(force: bool = False) -> VolumeState:
     mounts = _proc_mounts()
     if mounts.get(str(mnt)) == "btrfs" and not force:
         # already mounted (previous step in this job) — reuse
+        _ensure_canonical_link(base, build_root)
         st = VolumeState(mode="btrfs", backing_dir=str(base),
                          vol_mnt=str(mnt), img_path=str(img),
                          cap_gb=_df_total_gb_strict(str(mnt)),
@@ -251,6 +274,7 @@ def ensure_volume(force: bool = False) -> VolumeState:
         return ensure_volume(force=True)  # one retry with a fresh image
 
     build_root.mkdir(parents=True, exist_ok=True)
+    _ensure_canonical_link(base, build_root)
     st = VolumeState(mode="btrfs", backing_dir=str(base),
                      vol_mnt=str(mnt), img_path=str(img),
                      cap_gb=_df_total_gb_strict(str(mnt)),

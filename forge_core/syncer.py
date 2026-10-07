@@ -355,10 +355,11 @@ def ensure_prebuilts(build_root: Path) -> None:
             shutil.rmtree(p, ignore_errors=True)
         for p in out_dir.glob("target/product/*/system/product/app/webview*"):
             shutil.rmtree(p, ignore_errors=True)
-        # Purge temporary directory inside out/soong
-        soong_temp = out_dir / "soong" / ".temp"
-        if soong_temp.exists():
-            shutil.rmtree(soong_temp, ignore_errors=True)
+        # Purge temporary and bootstrap directories inside out/soong so Soong cleanly bootstraps
+        for soong_stale in (".temp", ".minibootstrap", ".bootstrap", ".glob"):
+            p = out_dir / "soong" / soong_stale
+            if p.exists():
+                shutil.rmtree(p, ignore_errors=True)
 
 
 def apply_patches(plan: Plan, build_root: Path, forge_root: Path) -> List[str]:
