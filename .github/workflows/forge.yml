@@ -60,12 +60,12 @@ on:
       candidates:
         description: "Silicon-mining candidates per slot (0 or 1 = off)"
         required: false
-        default: "8"
+        default: "20"
       strict_mining:
-        description: "Strict mining: abort slot if no score >= 90 CPU is found (reject slow fallback)"
+        description: "Strict mining: abort slot if no Zen5 score 100 CPU is found (reject slow fallback)"
         type: boolean
         required: false
-        default: false
+        default: true
   schedule:
     - cron: "17 3 * * 1"   # weekly catch-up (resume if a run was cut short)
 
@@ -77,7 +77,7 @@ permissions:
   contents: write
 
 env:
-  FORGE_STRICT_MINING: ${{ github.event.inputs.strict_mining || '' }}
+  FORGE_STRICT_MINING: ${{ github.event.inputs.strict_mining != '' && github.event.inputs.strict_mining || 'true' }}
 
 jobs:
   # --------------------------------------------------------------------------
@@ -104,7 +104,7 @@ jobs:
           INPUT_TARGET: ${{ github.event.inputs.target }}
           SKIP_TURBO: ${{ github.event.inputs.skip_turbo }}
           ROM: ${{ github.event.inputs.rom || 'qassa-a10' }}
-          CANDIDATES: ${{ github.event.inputs.candidates || '8' }}
+          CANDIDATES: ${{ github.event.inputs.candidates || '20' }}
         run: |
           set -euo pipefail
           python3 -m forge_core.cli --root . validate
@@ -123,9 +123,9 @@ jobs:
           rows = [] if os.environ.get("SKIP_TURBO") == "true" \
               else T.partition_plan(plan)
           try:
-              n = int(os.environ.get("CANDIDATES", "8"))
+              n = int(os.environ.get("CANDIDATES", "20"))
           except ValueError:
-              n = 8
+              n = 20
           mining = mining_matrix(mining=bool(n > 1), candidates=max(n, 1))
           def out(k, v):
               with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
@@ -239,7 +239,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix:
         candidate: ${{ fromJSON(needs.plan.outputs.mining) }}
     env:
@@ -255,7 +255,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m forge_core.mine gate --tag "$LOCK" --key "$KEY" \
-            --min-score 90 --wait-s 240 | tee mine.txt
+            --min-score 100 --wait-s 240 --strict | tee mine.txt
           ROLE=$(sed -n 's/^OUT: role=//p' mine.txt | tail -1)
           echo "role=$ROLE" >> "$GITHUB_OUTPUT"
           if [ "$ROLE" != "builder" ]; then
@@ -300,7 +300,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix:
         candidate: ${{ fromJSON(needs.plan.outputs.mining) }}
     env:
@@ -316,7 +316,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m forge_core.mine gate --tag "$LOCK" --key "$KEY" \
-            --min-score 90 --wait-s 240 | tee mine.txt
+            --min-score 100 --wait-s 240 --strict | tee mine.txt
           ROLE=$(sed -n 's/^OUT: role=//p' mine.txt | tail -1)
           echo "role=$ROLE" >> "$GITHUB_OUTPUT"
           if [ "$ROLE" != "builder" ]; then
@@ -361,7 +361,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix:
         candidate: ${{ fromJSON(needs.plan.outputs.mining) }}
     env:
@@ -377,7 +377,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m forge_core.mine gate --tag "$LOCK" --key "$KEY" \
-            --min-score 90 --wait-s 240 | tee mine.txt
+            --min-score 100 --wait-s 240 --strict | tee mine.txt
           ROLE=$(sed -n 's/^OUT: role=//p' mine.txt | tail -1)
           echo "role=$ROLE" >> "$GITHUB_OUTPUT"
           if [ "$ROLE" != "builder" ]; then
@@ -422,7 +422,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix:
         candidate: ${{ fromJSON(needs.plan.outputs.mining) }}
     env:
@@ -438,7 +438,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m forge_core.mine gate --tag "$LOCK" --key "$KEY" \
-            --min-score 90 --wait-s 240 | tee mine.txt
+            --min-score 100 --wait-s 240 --strict | tee mine.txt
           ROLE=$(sed -n 's/^OUT: role=//p' mine.txt | tail -1)
           echo "role=$ROLE" >> "$GITHUB_OUTPUT"
           if [ "$ROLE" != "builder" ]; then
@@ -483,7 +483,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix:
         candidate: ${{ fromJSON(needs.plan.outputs.mining) }}
     env:
@@ -499,7 +499,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m forge_core.mine gate --tag "$LOCK" --key "$KEY" \
-            --min-score 90 --wait-s 240 | tee mine.txt
+            --min-score 100 --wait-s 240 --strict | tee mine.txt
           ROLE=$(sed -n 's/^OUT: role=//p' mine.txt | tail -1)
           echo "role=$ROLE" >> "$GITHUB_OUTPUT"
           if [ "$ROLE" != "builder" ]; then
@@ -544,7 +544,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 20
       matrix:
         candidate: ${{ fromJSON(needs.plan.outputs.mining) }}
     env:
@@ -560,7 +560,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m forge_core.mine gate --tag "$LOCK" --key "$KEY" \
-            --min-score 90 --wait-s 240 | tee mine.txt
+            --min-score 100 --wait-s 240 --strict | tee mine.txt
           ROLE=$(sed -n 's/^OUT: role=//p' mine.txt | tail -1)
           echo "role=$ROLE" >> "$GITHUB_OUTPUT"
           if [ "$ROLE" != "builder" ]; then
