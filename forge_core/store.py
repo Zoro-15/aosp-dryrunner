@@ -178,6 +178,33 @@ class ReleaseStore:
         return (f'{prefix_env}gh release upload {tag} "$FILE" '
                 f'-R {repo} --clobber')
 
+    def claim(self, tag: str, title: str = "lock",
+              notes: str = "") -> bool:
+        """Atomic exactly-one-winner claim (silicon mining lock).
+
+        `gh release create` has GitHub create the tag server-side; two
+        concurrent creators race on one tag and exactly one wins — the
+        loser gets 'already_exists' (422). A failed create that did NOT
+        materialize the tag is a real store error and raises.
+        """
+        target = os.environ.get("GITHUB_REF_NAME", "main")
+        args = ["release", "create", tag, "--title", title,
+                "--notes", notes, "--target", target]
+        r = self._gh(*args, check=False)
+        if r.returncode == 0:
+            return True
+        if self.exists(tag):
+            return False                      # lost the race — clean
+        raise StoreError(f"claim {tag} failed: {r.stderr.strip()[:200]}")
+
+    def gc_locks(self, key: str) -> List[str]:
+        """Drop stale silicon-lock releases for a campaign key."""
+        dropped = []
+        for tag in self.list_tags(f"lock-{key}-"):
+            self.delete(tag)
+            dropped.append(tag)
+        return dropped
+
 
 # ---------------------------------------------------------------------------
 # FsStore (local dev + tests)
@@ -255,6 +282,27 @@ class FsStore:
     def sink_command(self, tag: str) -> Optional[str]:  # unsupported
         return None   # stage-mode fallback; Router/syncer handle falsy
 
+    def claim(self, tag: str, title: str = "lock",
+              notes: str = "") -> bool:
+        """Atomic claim: os.mkdir is atomic on POSIX — exactly one winner."""
+        d = self._dir(tag)
+        try:
+            d.mkdir(parents=True)
+        except FileExistsError:
+            return False
+        (d / ".meta").write_text(json.dumps({"title": title, "notes": notes,
+                                             "ts": time.time()}),
+                                 encoding="utf-8")
+        return True
+
+    def gc_locks(self, key: str) -> List[str]:
+        dropped = []
+        for p in self.root.iterdir():
+            if p.is_dir() and p.name.startswith(f"lock-{key}-"):
+                shutil.rmtree(p, ignore_errors=True)
+                dropped.append(p.name)
+        return dropped
+
 
 # ---------------------------------------------------------------------------
 # ArtifactStage (workflow-mediated transient store)
@@ -323,6 +371,12 @@ class Router:
             return self.rel.sink_command(tag)
         except StoreError:
             return None
+
+    def claim(self, tag: str, title: str = "lock", notes: str = "") -> bool:
+        return self.rel.claim(tag, title, notes)
+
+    def gc_locks(self, key: str):
+        return self.rel.gc_locks(key)
 
     # -- INDEX ---------------------------------------------------------------
     INDEX_TAG = "forge-index"
