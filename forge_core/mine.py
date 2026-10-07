@@ -67,7 +67,7 @@ def probe(cpuinfo_path: str = "/proc/cpuinfo") -> Dict[str, object]:
     """Parse the local CPU into a score. Pure w.r.t. the filesystem."""
     model, flags, mhz, cores = "", [], 0.0, 0
     try:
-        with open(cpuinfo_path, encoding="ascii", errors="replace") as fh:
+        with open(cpuinfo_path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if line.startswith("model name") and not model:
                     model = line.split(":", 1)[1].strip()

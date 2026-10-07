@@ -108,7 +108,7 @@ def detect() -> RunnerEnv:
     env = RunnerEnv()
     env.cores = os.cpu_count() or 2
     try:
-        with open("/proc/meminfo", encoding="ascii") as fh:
+        with open("/proc/meminfo", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if line.startswith("MemTotal:"):
                     env.mem_gb = int(line.split()[1]) / (1024 ** 2)
@@ -122,7 +122,7 @@ def detect() -> RunnerEnv:
 
     seen = {}
     try:
-        with open("/proc/mounts", encoding="ascii") as fh:
+        with open("/proc/mounts", encoding="utf-8", errors="replace") as fh:
             for raw in fh:
                 parts = raw.split()
                 if len(parts) < 3:
@@ -156,7 +156,6 @@ RECLAIM_PATHS = [
     "/usr/local/graalvm",
     "/usr/local/.ghcup",
     "/usr/share/swift",
-    "/opt/hostedtoolcache",
     "/opt/microsoft",
     "/usr/share/miniconda",
     "/usr/local/lib/node_modules",
@@ -191,6 +190,16 @@ def reclaim_disk() -> List[str]:
         if Path(p).exists():
             _safe_run(["sudo", "rm", "-rf", p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             removed.append(p)
+    # Prune non-Python hostedtoolcache toolchains (e.g. CodeQL, Java, go, Ruby, node)
+    # Never delete the running Python environment (/opt/hostedtoolcache/Python)
+    if os.path.exists("/opt/hostedtoolcache"):
+        try:
+            for child in Path("/opt/hostedtoolcache").iterdir():
+                if child.name != "Python":
+                    _safe_run(["sudo", "rm", "-rf", str(child)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    removed.append(str(child))
+        except Exception:
+            pass
     for cmd in (["sudo", "docker", "system", "prune", "-af"],
                 ["sudo", "apt-get", "clean"]):
         _safe_run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
