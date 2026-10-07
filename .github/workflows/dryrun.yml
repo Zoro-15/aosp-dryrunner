@@ -1,0 +1,95 @@
+name: "Nokia 6.1 (PL2) — LineageOS 23.2 Dry-Runner"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Build Target (nothing = Fast Dry-Run Linting | bootimage = Kernel Boot Partition | bacon = Full ROM)"
+        required: true
+        type: choice
+        options:
+          - nothing
+          - bootimage
+          - bacon
+        default: nothing
+      clean:
+        description: "Clean Build (make clean before compilation)"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: pl2-dryrunner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: "Compile / Dry-Run (Target: ${{ github.event.inputs.target || 'nothing' }})"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@v4
+
+      - name: "Maximize Runner Disk Space"
+        run: |
+          echo "--> Freeing runner disk space..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force 2>/dev/null || true
+          df -h
+
+      - name: "Install System Dependencies"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git git-lfs ccache zstd curl rsync zip unzip \
+            build-essential python-is-python3 python3-pip \
+            libssl-dev libncursesw5-dev bc bison flex libxml2-utils \
+            schedtool pkg-config libarchive-tools
+          
+          # Install Google repo tool
+          mkdir -p ~/.bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/.bin/repo
+          chmod a+x ~/.bin/repo
+          echo "$HOME/.bin" >> $GITHUB_PATH
+
+      - name: "Configure Git Identity"
+        run: |
+          git config --global user.name "Zoro-15"
+          git config --global user.email "bot@github.com"
+          git config --global color.ui false
+
+      - name: "Execute LineageOS 23.2 Build Script"
+        run: |
+          chmod +x build.sh
+          ./build.sh "${{ github.event.inputs.target || 'nothing' }}" "${{ github.event.inputs.clean || 'false' }}"
+
+      - name: "Upload Build Logs"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "build-logs-${{ github.event.inputs.target || 'nothing' }}"
+          path: |
+            build_a16_PL2.log
+            out/error.log
+          retention-days: 7
+
+      - name: "Upload Kernel Boot Image"
+        if: success() && (github.event.inputs.target == 'bootimage' || github.event.inputs.target == 'bacon')
+        uses: actions/upload-artifact@v4
+        with:
+          name: "PL2-boot-image"
+          path: out/target/product/PL2/boot.img
+          retention-days: 14
+
+      - name: "Upload LineageOS ROM Package"
+        if: success() && github.event.inputs.target == 'bacon'
+        uses: actions/upload-artifact@v4
+        with:
+          name: "PL2-LineageOS-23.2-Package"
+          path: out/target/product/PL2/lineage-23.2-*-UNOFFICIAL-PL2.zip
+          retention-days: 14

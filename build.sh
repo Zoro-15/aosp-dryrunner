@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  LineageOS 23.2 (Android 16) Build & Dry-Run Script for Nokia 6.1 (PL2)
+# =============================================================================
+set -e
+
+TARGET="${1:-nothing}"
+CLEAN="${2:-false}"
+START_TIME=$(date +%s)
+
+echo "====================================================================="
+echo " Building LineageOS 23.2 (Android 16) for Nokia 6.1 (PL2)"
+echo " Target : $TARGET"
+echo " Clean  : $CLEAN"
+echo "====================================================================="
+
+# 1. Environment & Memory Guards
+echo "--> Configuring build environment..."
+export GOMEMLIMIT=12GiB
+export GOGC=50
+export _JAVA_OPTIONS="-Xmx8g"
+export SOONG_ALLOW_MISSING_DEPENDENCIES=true
+export DISABLE_DEXPREOPT_CHECK=true
+export WITH_DEXPREOPT=false
+unset WITHOUT_CHECK_API
+export WITHOUT_CHECK_API=false
+unset SKIP_ABI_CHECKS
+
+# 2. Pre-flight tree cleanup
+echo "--> Cleaning stale device trees and manifests..."
+rm -rf .repo/local_manifests/
+rm -rf device/nokia/PL2 device/nokia/sdm660-common
+rm -rf vendor/nokia/PL2 vendor/nokia/sdm660-common
+rm -rf kernel/nokia/sdm660
+rm -rf hardware/qcom-caf/sdm660 hardware/qcom-caf/msm8998
+rm -rf device/qcom/sepolicy-legacy-um hardware/lineage/compat
+
+# 3. Base Manifest initialization & Local Manifest deployment
+echo "--> Initializing LineageOS 23.2 base manifest..."
+repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --git-lfs --depth=1
+
+echo "--> Deploying PL2 local manifest..."
+mkdir -p .repo/local_manifests
+if [ -f "manifests/PL2.xml" ]; then
+    cp manifests/PL2.xml .repo/local_manifests/PL2.xml
+else
+    cat << "EOF" > .repo/local_manifests/PL2.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remove-project name="LineageOS/android_hardware_qcom_audio" />
+  <remove-project name="LineageOS/android_hardware_qcom_display" />
+  <remove-project name="LineageOS/android_hardware_qcom_media" />
+  <remove-project name="LineageOS/android_device_qcom_sepolicy" />
+  <remove-project name="LineageOS/android_hardware_lineage_compat" />
+
+  <project path="device/nokia/sdm660-common" name="Zoro-15/android_device_nokia_sdm660-common" remote="github" revision="lineage-23.2" />
+  <project path="device/nokia/PL2" name="Zoro-15/android_device_nokia_PL2" remote="github" revision="lineage-23.2" />
+  <project path="vendor/nokia/sdm660-common" name="Zoro-15/proprietary_vendor_nokia_sdm660-common" remote="github" revision="lineage-23.2" />
+  <project path="vendor/nokia/PL2" name="Zoro-15/proprietary_vendor_nokia_PL2" remote="github" revision="lineage-23.2" />
+  <project path="kernel/nokia/sdm660" name="Zoro-15/android_kernel_nokia_PL2_16" remote="github" revision="lineage-23.2" />
+  <project path="hardware/qcom-caf/sdm660/audio" name="Zoro-15/android_hardware_qcom_audio" remote="github" revision="lineage-23.2" />
+  <project path="hardware/qcom-caf/sdm660/display" name="Zoro-15/android_hardware_qcom_display" remote="github" revision="lineage-23.2-caf-msm8953" />
+  <project path="hardware/qcom-caf/sdm660/media" name="Zoro-15/android_hardware_qcom_media" remote="github" revision="lineage-23.2-caf-msm8953" />
+  <project path="device/qcom/sepolicy-legacy-um" name="Zoro-15/android_device_qcom_sepolicy" remote="github" revision="lineage-23.2" />
+  <project path="hardware/lineage/compat" name="log1cs/android_hardware_lineage_compat" remote="github" revision="lineage-23.2" />
+</manifest>
+EOF
+fi
+
+# 4. Sync source repositories
+echo "--> Syncing source repositories..."
+set +e
+if [ -f "/opt/crave/resync.sh" ]; then
+    /opt/crave/resync.sh
+else
+    repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --force-remove-dirty
+fi
+set -e
+
+# 5. Fallback clones (ensure all 10 trees exist)
+echo "--> Verifying device and hardware trees..."
+[ ! -d "device/nokia/sdm660-common" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/android_device_nokia_sdm660-common.git device/nokia/sdm660-common
+[ ! -d "device/nokia/PL2" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/android_device_nokia_PL2.git device/nokia/PL2
+[ ! -d "vendor/nokia/sdm660-common" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/proprietary_vendor_nokia_sdm660-common.git vendor/nokia/sdm660-common
+[ ! -d "vendor/nokia/PL2" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/proprietary_vendor_nokia_PL2.git vendor/nokia/PL2
+[ ! -d "kernel/nokia/sdm660" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/android_kernel_nokia_PL2_16.git kernel/nokia/sdm660
+[ ! -d "hardware/qcom-caf/sdm660/audio" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/android_hardware_qcom_audio.git hardware/qcom-caf/sdm660/audio
+[ ! -d "hardware/qcom-caf/sdm660/display" ] && git clone --depth=1 -b lineage-23.2-caf-msm8953 https://github.com/Zoro-15/android_hardware_qcom_display.git hardware/qcom-caf/sdm660/display
+[ ! -d "hardware/qcom-caf/sdm660/media" ] && git clone --depth=1 -b lineage-23.2-caf-msm8953 https://github.com/Zoro-15/android_hardware_qcom_media.git hardware/qcom-caf/sdm660/media
+[ ! -d "device/qcom/sepolicy-legacy-um" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/android_device_qcom_sepolicy.git device/qcom/sepolicy-legacy-um
+[ ! -d "hardware/lineage/compat" ] && git clone --depth=1 -b lineage-23.2 https://github.com/log1cs/android_hardware_lineage_compat.git hardware/lineage/compat
+
+# 6. Soong namespaces setup
+mkdir -p hardware/qcom-caf/sdm660 hardware/qcom-caf/msm8998
+[ ! -f "hardware/qcom-caf/sdm660/Android.bp" ] && echo "soong_namespace {}" > hardware/qcom-caf/sdm660/Android.bp
+[ ! -f "hardware/qcom-caf/msm8998/Android.bp" ] && echo "soong_namespace {}" > hardware/qcom-caf/msm8998/Android.bp
+
+# 7. CCACHE setup
+if command -v ccache &>/dev/null; then
+    export USE_CCACHE=1
+    export CCACHE_EXEC="$(command -v ccache)"
+    export CCACHE_DIR="${HOME}/.ccache"
+    "$CCACHE_EXEC" -M 50G 2>/dev/null || true
+    "$CCACHE_EXEC" -o compression=true 2>/dev/null || true
+elif [ -x "prebuilts/misc/linux-x86/ccache/ccache" ]; then
+    export USE_CCACHE=1
+    export CCACHE_EXEC="$(pwd)/prebuilts/misc/linux-x86/ccache/ccache"
+    export CCACHE_DIR="${HOME}/.ccache"
+    "$CCACHE_EXEC" -M 50G 2>/dev/null || true
+    "$CCACHE_EXEC" -o compression=true 2>/dev/null || true
+fi
+
+# 8. Environment Setup & Lunch Target
+source build/envsetup.sh
+if lunch lineage_PL2-ap4a-userdebug 2>/dev/null; then
+    echo "--> Selected lunch target: lineage_PL2-ap4a-userdebug"
+elif lunch lineage_PL2-bp1a-userdebug 2>/dev/null; then
+    echo "--> Selected lunch target: lineage_PL2-bp1a-userdebug"
+elif lunch lineage_PL2-userdebug; then
+    echo "--> Selected lunch target: lineage_PL2-userdebug"
+else
+    echo "[FATAL] Lunch failed!"
+    exit 1
+fi
+
+# 9. Optional Clean
+if [ "$CLEAN" = "true" ]; then
+    echo "--> Running make clean..."
+    make clean || true
+else
+    echo "--> Running installclean & resetting Ninja graph..."
+    make installclean || true
+    rm -rf out/soong/system_server_dexjars out/soong/.ninja_deps out/soong/.ninja_log
+fi
+
+# 10. Execute Target
+echo "--> Executing target: $TARGET"
+if [ "$TARGET" = "nothing" ]; then
+    echo "--> Verifying Soong analysis and Ninja dependency graph (m nothing)..."
+    m nothing -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
+    BUILD_STATUS=${PIPESTATUS[0]}
+elif [ "$TARGET" = "bootimage" ]; then
+    echo "--> Compiling boot partition (kernel + ramdisk + DTBO)..."
+    mka bootimage -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
+    BUILD_STATUS=${PIPESTATUS[0]}
+else
+    echo "--> Compiling LineageOS bacon target..."
+    mka bacon -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
+    BUILD_STATUS=${PIPESTATUS[0]}
+fi
+
+if [ $BUILD_STATUS -ne 0 ]; then
+    echo "[FATAL] Build failed with exit code $BUILD_STATUS"
+    exit $BUILD_STATUS
+fi
+
+# 11. Artifact Summary
+echo "====================================================================="
+echo " Build Completed Successfully"
+echo "====================================================================="
+if [ -f "out/target/product/PL2/boot.img" ]; then
+    echo "[ARTIFACT] boot.img: $(ls -lh out/target/product/PL2/boot.img | awk '{print $5}')"
+fi
+OUT_ZIP=$(ls out/target/product/PL2/lineage-23.2-*-UNOFFICIAL-PL2.zip 2>/dev/null | head -n 1 || true)
+if [ -n "$OUT_ZIP" ] && [ -f "$OUT_ZIP" ]; then
+    echo "[ARTIFACT] ROM ZIP: $OUT_ZIP ($(ls -lh "$OUT_ZIP" | awk '{print $5}'))"
+fi
+
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+echo "=== Elapsed Time: $((ELAPSED / 60))m $((ELAPSED % 60))s ==="
