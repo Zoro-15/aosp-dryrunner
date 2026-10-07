@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
-from . import chunker, config, engine, env as fenv, gate as fgate
-from . import log, relay, syncer, turbo
+from . import chunker, config, dag, engine, env as fenv, gate as fgate
+from . import log, mine, relay, storage, syncer, turbo
 from .config import ConfigError, build_plan
 from .store import FsStore, ReleaseStore, Router, StoreError
 
@@ -69,18 +69,40 @@ def _build_root(args) -> Path:
         return Path(env_root)
     if getattr(args, "build_root", None):
         return Path(args.build_root)
-    if os.path.exists("/mnt"):
-        return Path("/mnt/romforge/aosp")
+    # storage.default_build_root(): the btrfs volume mount if active,
+    # else <best-mount>/romforge/aosp — identical to the old plain layout
     try:
-        mnt = fenv.detect().best_mount()
-        return Path(mnt.path) / "romforge" / "aosp"
+        return Path(storage.default_build_root())
     except Exception:
+        if os.path.exists("/mnt"):
+            return Path("/mnt/romforge/aosp")
         return Path("/tmp/romforge/aosp")
+
+
+def _ensure_volume(args) -> storage.VolumeState:
+    """Mount (or reuse) the compressed build volume; returns its state.
+    Called by every command that touches the tree. In degraded/plain mode
+    this is a no-op that returns an honest reason."""
+    try:
+        vol = storage.ensure_volume()
+    except Exception as e:  # noqa: BLE001 — degrade, never abort
+        vol = storage.VolumeState(mode="plain", reason=str(e)[:200])
+    if vol.mode == "btrfs":
+        log.ok(f"storage v2: btrfs zstd:1 volume at {vol.vol_mnt} "
+               f"(cap {vol.cap_gb:.0f} GiB)")
+    else:
+        log.warn(f"storage v2 DEGRADED (plain dirs): {vol.reason}")
+    return vol
 
 
 # ---------------------------------------------------------------------------
 def cmd_probe(args, root: Path) -> int:
-    """Lightweight INDEX probe: emits src_needed / state / done for the DAG."""
+    """Lightweight INDEX probe: emits src_needed / state / done / phase.
+
+    `phase` is the DAG conveyor decision (forge_core.dag.next_action):
+    verify | slice | fail — the workflow gates verify/publish/conveyor on
+    it, so the premature-verification class of bugs becomes structurally
+    impossible (the YAML never guesses; it reads the INDEX)."""
     plan = _plan_from_args(args, root)
     store = _store(args, root)
     t = store.target(plan.rom.key)
@@ -94,13 +116,18 @@ def cmd_probe(args, root: Path) -> int:
         except Exception:
             pass
     src_ok = bool(src_tag) and store.exists(src_tag) and not args.force
+    decision = dag.next_action(t)
     log.out("src_needed", "false" if src_ok else "true")
     log.out("src_tag", src_tag)
     log.out("done", "true" if t.get("done") else "false")
     log.out("slice", str(t.get("slice", 0)))
     log.out("state_tag", t.get("state_tag", ""))
+    log.out("classification", t.get("last_classification", ""))
     log.out("runner", plan.runner_image)
     log.out("target_key", plan.rom.key)
+    log.out("phase", decision["phase"])
+    log.out("phase_reason", decision["reason"])
+    log.log(f"conveyor decision: {decision['phase']} — {decision['reason']}")
     return 0
 
 
@@ -110,6 +137,13 @@ def cmd_doctor(args, root: Path) -> int:
     for tool in ("git", "gh", "zstd", "rsync", "tar", "ccache"):
         w = shutil.which(tool)
         print(f"  tool {tool:8s} -> {w or 'MISSING'}")
+    st = storage.selftest()
+    print(f"  storage: {st}")
+    silicon = mine.probe()
+    print(f"  silicon: {silicon['model']} (score {silicon['score']}, "
+          f"{silicon['class']}, avx512={silicon['avx512']})")
+    snap = storage.snapshot(Path(_build_root(args)))
+    print(f"  disks   : {snap.to_dict()}")
     errs = config.validate_all(root)
     print(f"  configs : {'OK (' + str(len(list((root / 'configs' / 'roms').glob('*.yaml')))) + ' roms)' if not errs else 'ERRORS'}")
     for e_ in errs:
@@ -153,20 +187,32 @@ def cmd_prepare(args, root: Path) -> int:
         fenv.reclaim_disk()
     except Exception:
         pass
-    build_root = _build_root(args)
-    fenv._safe_run(["sudo", "mkdir", "-p", str(build_root.parent)])
-    fenv._safe_run(["sudo", "chmod", "1777", str(build_root.parent)])
+    # 1. mount the compressed build volume FIRST — everything below lands
+    #    on it (or honestly degrades to the plain layout)
+    vol = _ensure_volume(args)
+    build_root = Path(vol.build_root) if vol.build_root else _build_root(args)
+    # 2. swap: ALWAYS on the raw backing mount — swapfiles inside a btrfs
+    #    image are unsafe (COW + swap deadlock) and / is too small (14-25G)
+    swap_dir = Path(vol.backing_dir) if vol.backing_dir else \
+        Path(build_root).parent
+    fenv._safe_run(["sudo", "mkdir", "-p", str(swap_dir)])
+    if vol.mode != "btrfs":
+        # plain mode: legacy layout prep (btrfs mode skips the recursive
+        # chmod — it would flatten archive-restored permissions)
+        fenv._safe_run(["sudo", "mkdir", "-p", str(build_root.parent)])
+        fenv._safe_run(["sudo", "chmod", "1777", str(build_root.parent)])
+        if os.path.exists("/mnt"):
+            fenv._safe_run(["sudo", "mkdir", "-p", "/mnt/romforge",
+                            str(build_root), str(build_root / "out")])
+            fenv._safe_run(["sudo", "chmod", "-R", "1777", "/mnt/romforge"])
     try:
-        build_root.parent.mkdir(parents=True, exist_ok=True)
         build_root.mkdir(parents=True, exist_ok=True)
+        (build_root / "out").mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
-    if os.path.exists("/mnt"):
-        fenv._safe_run(["sudo", "mkdir", "-p", "/mnt/romforge", str(build_root), str(build_root / "out")])
-        fenv._safe_run(["sudo", "chmod", "-R", "1777", "/mnt/romforge"])
     if plan:
         try:
-            swap_path = str(Path(build_root).parent / ".forge-swap")
+            swap_path = str(swap_dir / ".forge-swap")
             fenv.ensure_swap(swap_path, size_gb=int(plan.version.get("swap_gb", 4)))
         except Exception:
             pass
@@ -181,6 +227,10 @@ def cmd_prepare(args, root: Path) -> int:
             except Exception:
                 pass
     log.out("build_root", str(build_root))
+    log.out("storage_mode", vol.mode)
+    if vol.degraded:
+        log.warn(f"storage DEGRADED: {vol.reason} — the run continues on "
+                 "plain dirs (old capacity rules apply)")
     log.ok(f"runner prepared at {build_root}")
     return 0
 
@@ -269,16 +319,19 @@ def cmd_slice(args, root: Path) -> int:
     """One self-sufficient build slot.
 
     Idempotent by design so the workflow can define a fixed chain of these:
-      1. INDEX says done?  -> no-op, emit classification=done
-      2. restore source    -> from content-addressed src-<mhash>
-      3. patches + lunch sanity
-      4. restore out/ state (exact resume); cold start -> merge turbo states
-      5. run the slice (or the turbo partition prewarm)
-      6. bank out/ state + update INDEX
+      0. INDEX says done?   -> no-op, emit classification=done
+      1. capacity halt?     -> refuse (the conveyor must stop re-dispatch;
+                               see forge_core.dag — the storage-deadlock fix)
+      2. mount build volume -> source/out land on btrfs zstd:1 (or plain)
+      3. restore source     -> from content-addressed src-<mhash>
+      4. patches + lunch sanity
+      5. restore out/ state (exact resume); cold start -> merge turbo states
+      6. run the slice (or the turbo partition prewarm)
+      7. bank out/ state + update INDEX (incl. last_classification +
+         stop_reason, which drive the DAG conveyor's next decision)
     """
     plan = _plan_from_args(args, root)
     store = _store(args, root)
-    build_root = _build_root(args)
     t = store.target(plan.rom.key)
 
     # per-run target override (workflow_dispatch input)
@@ -290,7 +343,21 @@ def cmd_slice(args, root: Path) -> int:
         log.out("classification", "done")
         return 0
 
-    # ---- 1. source ----------------------------------------------------------
+    # ---- 0. capacity halt: the storage-deadlock guard -----------------------
+    if t.get("last_classification") == "capacity" and not args.force:
+        log.warn("INDEX says the last slice stopped on DISK CAPACITY — "
+                 "refusing to re-run (this is the deadlock guard; re-"
+                 "dispatching would burn 30 min to reproduce the same "
+                 "stop). Grow the volume (FORGE_VOLUME_RESERVE_GB) or "
+                 "prune the working set, then --force.")
+        log.out("classification", "capacity")
+        return 1
+
+    # ---- 1. storage volume + tree --------------------------------------------
+    vol = _ensure_volume(args)
+    build_root = Path(vol.build_root) if vol.build_root else _build_root(args)
+
+    # ---- 2. source ----------------------------------------------------------
     src_tag = t.get("src_tag") or (f"src-{args.mhash}" if args.mhash else None)
     if not src_tag:
         try:
@@ -350,12 +417,20 @@ def cmd_slice(args, root: Path) -> int:
     log_file = Path(args.log or "/tmp/forge-slice.log")
     res = engine.run_slice(plan, build_root, plan.rom.build_target, budget,
                            log_file, use_ccache=use_ccache)
+    # done-requires-zip: rc==0 alone is NOT success (the second half of the
+    # premature-verification bug — dag.finalize_classification)
+    if res["classification"] == "done":
+        rom_zip = engine.find_rom_zip(plan, build_root)
+        res["classification"] = dag.finalize_classification(
+            "done", rom_zip)["classification"]
+    else:
+        rom_zip = None
     log.out("classification", str(res["classification"]))
+    log.out("stop_reason", str(res.get("stop_reason", "")))
+    log.out("rom_zip", str(rom_zip) if rom_zip else "")
     engine.slice_summary(res, log_file, build_root / "out", budget)
 
     if res["classification"] == "done":
-        rom_zip = engine.find_rom_zip(plan, build_root)
-        log.out("rom_zip", str(rom_zip) if rom_zip else "")
         # bank the FINAL out/ too: verify+publish run on fresh runners and
         # restore this state (the gate needs product-dir artifacts + zip)
         n = int(t.get("slice", 0)) + 1
@@ -365,19 +440,26 @@ def cmd_slice(args, root: Path) -> int:
                          "Final state: carries the ROM zip for the gate.")
         relay.bank(build_root, store, tag, plan.rom.key, n,
                    notes="final state, classification=done")
-        store.target_update(plan.rom.key, slice=n, state_tag=tag, done=True)
+        store.target_update(plan.rom.key, slice=n, state_tag=tag, done=True,
+                            rom_zip=str(rom_zip),
+                            last_classification="done", stop_reason="")
         return 0
 
-    if res["classification"] == "sliced":
+    if res["classification"] in ("sliced", "capacity"):
         n = int(t.get("slice", 0)) + 1
         tag = f"state-{plan.rom.key}-s{n}"
         if not store.exists(tag):
             store.create(tag, f"out-state {plan.rom.key} slice {n}",
                          "Exact-resume ninja state.")
         relay.bank(build_root, store, tag, plan.rom.key, n,
-                   notes=f"slice {n}, classification=sliced")
-        store.target_update(plan.rom.key, slice=n, state_tag=tag, done=False)
+                   notes=f"slice {n}, classification={res['classification']}")
+        store.target_update(plan.rom.key, slice=n, state_tag=tag, done=False,
+                            last_classification=str(res["classification"]),
+                            stop_reason=str(res.get("stop_reason", "")))
         log.out("slice", str(n))
+        # capacity exits GREEN from the slot itself: the state is banked and
+        # the POSTCHECK reads INDEX and red-outs the run — a red slot here
+        # would skip the postcheck (which carries the human-readable reason)
         return 0
 
     # real error — dump forensics tail to console
@@ -399,7 +481,9 @@ def cmd_slice(args, root: Path) -> int:
                      "Exact-resume ninja state after a build error.")
     relay.bank(build_root, store, tag, plan.rom.key, n,
                notes=f"slice {n}, classification=error")
-    store.target_update(plan.rom.key, slice=n, state_tag=tag)
+    store.target_update(plan.rom.key, slice=n, state_tag=tag,
+                        last_classification="error",
+                        stop_reason=str(res.get("stop_reason", "")))
     return 1
 
 
@@ -422,7 +506,8 @@ def _ensure_out(plan, store, build_root: Path) -> None:
 def cmd_verify(args, root: Path) -> int:
     plan = _plan_from_args(args, root)
     store = _store(args, root)
-    build_root = _build_root(args)
+    vol = _ensure_volume(args)
+    build_root = Path(vol.build_root) if vol.build_root else _build_root(args)
     _ensure_out(plan, store, build_root)
     dev = plan.rom.lunch.split("_")[1]
     pdir = build_root / "out" / "target" / "product" / dev
@@ -446,7 +531,8 @@ def cmd_verify(args, root: Path) -> int:
 def cmd_publish(args, root: Path) -> int:
     plan = _plan_from_args(args, root)
     store = _store(args, root)
-    build_root = _build_root(args)
+    vol = _ensure_volume(args)
+    build_root = Path(vol.build_root) if vol.build_root else _build_root(args)
     _ensure_out(plan, store, build_root)
     report_path = Path(args.report or "SAFETY_REPORT.json")
     if not report_path.exists():
@@ -501,7 +587,11 @@ def cmd_publish(args, root: Path) -> int:
 def cmd_gc(args, root: Path) -> int:
     plan = _plan_from_args(args, root)
     store = _store(args, root)
-    store.gc_state(plan.rom.key, keep=int(args.keep))
+    dropped = store.gc_state(plan.rom.key, keep=int(args.keep))
+    if getattr(args, "locks", False):
+        locks = store.gc_locks(plan.rom.key)
+        log.out("locks_dropped", str(len(locks)))
+    log.out("state_dropped", str(len(dropped)))
     return 0
 
 
@@ -537,6 +627,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             ("--out", {"default": None}),
             ("--force", {"action": "store_true"}),
             ("--keep", {"default": "2", "type": int}),
+            ("--locks", {"action": "store_true"}),
             ("--no-stream", {"action": "store_true"})):
         try:
             sub.add_argument(flag, **kwargs)
