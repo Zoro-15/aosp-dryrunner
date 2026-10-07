@@ -433,6 +433,14 @@ def test_mine(tmp: Path) -> None:
         check("non-target, nobody claims -> fallback builder",
               r["role"] == "builder" and "fallback" in r["reason"], str(r))
 
+        st4_strict = FsStore(tmp / "mine-store4-strict")
+        t_strict = {"t": 0.0}
+        r_strict = mine.gate(st4_strict, "lock-g3-strict", key="", min_score=90, wait_s=10,
+                             strict=True, sleep_fn=lambda s: None,
+                             clock_fn=lambda: t_strict.__setitem__("t", t_strict["t"] + 5) or t_strict["t"])
+        check("strict mining, non-target -> discarded (no fallback)",
+              r_strict["role"] == "discarded" and "strict" in r_strict["reason"], str(r_strict))
+
         st5 = FsStore(tmp / "mine-store5")
         st5.claim("lock-g4", "t", "n")
         r = mine.gate(st5, "lock-g4", key="", min_score=90, wait_s=10,

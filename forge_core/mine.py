@@ -121,17 +121,21 @@ def claim(store, tag: str, meta: Dict[str, object]) -> bool:
 def gate(store, tag: str, key: str = "", min_score: int = DEFAULT_MIN_SCORE,
          wait_s: int = DEFAULT_WAIT_S,
          poll_s: int = POLL_INTERVAL_S,
+         strict: bool = False,
          sleep_fn=time.sleep, clock_fn=time.time) -> Dict[str, str]:
     """Decide this candidate's role. Returns {role, score, model, reason}.
 
     role: 'builder'          — claim won, run the slice
           'builder-fallback' — claim won after scoreboard timeout (any CPU)
-          'discarded'        — a better (or equal) peer is building
+          'discarded'        — a better (or equal) peer is building (or strict fail)
           'done'             — INDEX already says done, no-op entirely
 
     Raises MineError when the store is unhealthy (nobody claimed, nobody
     can) so the job goes red instead of silently making no progress.
     """
+    if strict or os.environ.get("FORGE_STRICT_MINING") in ("1", "true", "True"):
+        strict = True
+
     # 0. done short-circuit: when the campaign is finished every candidate
     #    must exit in seconds, without touching the lock.
     if key:
@@ -173,7 +177,14 @@ def gate(store, tag: str, key: str = "", min_score: int = DEFAULT_MIN_SCORE,
                 "model": str(info["model"]),
                 "reason": "peer claimed at the fallback deadline"}
 
-    # 3. fallback: never stall the campaign on the silicon lottery
+    # 3. fallback: check strict mode before claiming slower silicon
+    if strict:
+        log.warn(f"mining [STRICT]: no target silicon (>= {min_score}) appeared in {wait_s}s — "
+                 f"rejecting slow silicon ({info['model']}, score {info['score']})")
+        return {"role": "discarded", "score": str(info["score"]),
+                "model": str(info["model"]),
+                "reason": f"strict mining: no target silicon (>= {min_score}) appeared in {wait_s}s"}
+
     meta["fallback"] = True
     if claim(store, tag, meta):
         log.warn(f"mining: no target silicon appeared in {wait_s}s — "
@@ -222,6 +233,8 @@ def _main(argv: Optional[List[str]] = None) -> int:
     p_gate.add_argument("--key", default="")
     p_gate.add_argument("--min-score", type=int, default=DEFAULT_MIN_SCORE)
     p_gate.add_argument("--wait-s", type=int, default=DEFAULT_WAIT_S)
+    p_gate.add_argument("--strict", action="store_true", default=False,
+                        help="Reject fallback and abort if target silicon is not mined")
     p_gate.add_argument("--fs-root", default=None)
     p_gate.add_argument("--repo", default=None)
 
@@ -245,7 +258,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     # gate
     res = gate(store, args.tag, key=args.key, min_score=args.min_score,
-               wait_s=args.wait_s)
+               wait_s=args.wait_s, strict=args.strict)
     log.out("role", res["role"])
     log.out("score", res["score"])
     log.out("model", res["model"])

@@ -61,6 +61,11 @@ on:
         description: "Silicon-mining candidates per slot (0 or 1 = off)"
         required: false
         default: "8"
+      strict_mining:
+        description: "Strict mining: abort slot if no score >= 90 CPU is found (reject slow fallback)"
+        type: boolean
+        required: false
+        default: false
   schedule:
     - cron: "17 3 * * 1"   # weekly catch-up (resume if a run was cut short)
 
@@ -70,6 +75,9 @@ concurrency:
 
 permissions:
   contents: write
+
+env:
+  FORGE_STRICT_MINING: ${{ github.event.inputs.strict_mining || '' }}
 
 jobs:
   # --------------------------------------------------------------------------
