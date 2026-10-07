@@ -4,12 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Build Target (nothing = Fast Dry-Run Linting | bootimage = Kernel Boot Partition | bacon = Full ROM)"
+        description: "Target (nothing = ~5m Lint | selinux_policy = ~5m SEPolicy | bootimage = ~20m Kernel | vendorimage = ~25m HALs | bacon = Full ROM)"
         required: true
         type: choice
         options:
           - nothing
+          - selinux_policy
           - bootimage
+          - vendorimage
           - bacon
         default: nothing
       clean:
@@ -24,9 +26,9 @@ concurrency:
 
 jobs:
   build:
-    name: "Compile / Dry-Run (Target: ${{ github.event.inputs.target || 'nothing' }})"
+    name: "Probe Errors (Target: ${{ github.event.inputs.target || 'nothing' }})"
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 180
 
     steps:
       - name: "Checkout Repository"
@@ -63,12 +65,12 @@ jobs:
           git config --global user.email "bot@github.com"
           git config --global color.ui false
 
-      - name: "Execute LineageOS 23.2 Build Script"
+      - name: "Execute LineageOS 23.2 Error-Probing Target"
         run: |
           chmod +x build.sh
           ./build.sh "${{ github.event.inputs.target || 'nothing' }}" "${{ github.event.inputs.clean || 'false' }}"
 
-      - name: "Upload Build Logs"
+      - name: "Upload Error / Build Logs"
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -84,6 +86,14 @@ jobs:
         with:
           name: "PL2-boot-image"
           path: out/target/product/PL2/boot.img
+          retention-days: 14
+
+      - name: "Upload Vendor Image"
+        if: success() && (github.event.inputs.target == 'vendorimage' || github.event.inputs.target == 'bacon')
+        uses: actions/upload-artifact@v4
+        with:
+          name: "PL2-vendor-image"
+          path: out/target/product/PL2/vendor.img
           retention-days: 14
 
       - name: "Upload LineageOS ROM Package"

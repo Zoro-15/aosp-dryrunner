@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  LineageOS 23.2 (Android 16) Build & Dry-Run Script for Nokia 6.1 (PL2)
+#  LineageOS 23.2 (Android 16) Build & Fast Error-Probing Dry-Runner for PL2
 # =============================================================================
 set -e
 
@@ -9,7 +9,7 @@ CLEAN="${2:-false}"
 START_TIME=$(date +%s)
 
 echo "====================================================================="
-echo " Building LineageOS 23.2 (Android 16) for Nokia 6.1 (PL2)"
+echo " LineageOS 23.2 Fast Error-Probing Runner — Nokia 6.1 (PL2)"
 echo " Target : $TARGET"
 echo " Clean  : $CLEAN"
 echo "====================================================================="
@@ -128,38 +128,59 @@ if [ "$CLEAN" = "true" ]; then
     echo "--> Running make clean..."
     make clean || true
 else
-    echo "--> Running installclean & resetting Ninja graph..."
+    echo "--> Running installclean..."
     make installclean || true
-    rm -rf out/soong/system_server_dexjars out/soong/.ninja_deps out/soong/.ninja_log
 fi
 
-# 10. Execute Target
+# 10. Execute Target & Capture Errors
 echo "--> Executing target: $TARGET"
+set +e
 if [ "$TARGET" = "nothing" ]; then
-    echo "--> Verifying Soong analysis and Ninja dependency graph (m nothing)..."
+    echo "--> Probing Soong analysis, Blueprint syntax & SEPolicy graph (m nothing)..."
     m nothing -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
     BUILD_STATUS=${PIPESTATUS[0]}
 elif [ "$TARGET" = "bootimage" ]; then
-    echo "--> Compiling boot partition (kernel + ramdisk + DTBO)..."
+    echo "--> Compiling kernel 4.4 + DTBO + ramdisk (mka bootimage)..."
     mka bootimage -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
     BUILD_STATUS=${PIPESTATUS[0]}
+elif [ "$TARGET" = "vendorimage" ]; then
+    echo "--> Compiling Qualcomm CAF HALs & vendor partition (mka vendorimage)..."
+    mka vendorimage -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
+    BUILD_STATUS=${PIPESTATUS[0]}
+elif [ "$TARGET" = "selinux_policy" ]; then
+    echo "--> Auditing and compiling SELinux policy rules (mka selinux_policy)..."
+    mka selinux_policy -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
+    BUILD_STATUS=${PIPESTATUS[0]}
 else
-    echo "--> Compiling LineageOS bacon target..."
-    mka bacon -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
+    echo "--> Compiling custom / full target ($TARGET)..."
+    mka "$TARGET" -j$(nproc --all) 2>&1 | tee build_a16_PL2.log
     BUILD_STATUS=${PIPESTATUS[0]}
 fi
+set -e
 
+# 11. Error Extraction & Reporting
 if [ $BUILD_STATUS -ne 0 ]; then
-    echo "[FATAL] Build failed with exit code $BUILD_STATUS"
+    echo ""
+    echo "====================================================================="
+    echo " [!] BUILD FAILED (Exit Code: $BUILD_STATUS) — ERROR EXTRACTION"
+    echo "====================================================================="
+    grep -E -A 2 -B 1 "FAILED:|error:|fatal error:|ninja: error:|neverallow" build_a16_PL2.log | tail -n 50 || true
+    echo "====================================================================="
+    echo " Full log saved in: build_a16_PL2.log"
+    echo "====================================================================="
     exit $BUILD_STATUS
 fi
 
-# 11. Artifact Summary
+# 12. Success Summary
+echo ""
 echo "====================================================================="
-echo " Build Completed Successfully"
+echo " [✓] Build Completed Successfully (0 Errors)"
 echo "====================================================================="
 if [ -f "out/target/product/PL2/boot.img" ]; then
     echo "[ARTIFACT] boot.img: $(ls -lh out/target/product/PL2/boot.img | awk '{print $5}')"
+fi
+if [ -f "out/target/product/PL2/vendor.img" ]; then
+    echo "[ARTIFACT] vendor.img: $(ls -lh out/target/product/PL2/vendor.img | awk '{print $5}')"
 fi
 OUT_ZIP=$(ls out/target/product/PL2/lineage-23.2-*-UNOFFICIAL-PL2.zip 2>/dev/null | head -n 1 || true)
 if [ -n "$OUT_ZIP" ] && [ -f "$OUT_ZIP" ]; then
