@@ -47,7 +47,7 @@ rm -rf device/qcom/sepolicy-legacy-um hardware/lineage/compat
 
 # 3. Base Manifest initialization & Local Manifest deployment
 echo "--> Initializing LineageOS 23.2 base manifest..."
-repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --git-lfs --depth=1
+repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --git-lfs --depth=1 --groups=default,-darwin,-x86,-mips,-pdk
 
 echo "--> Deploying PL2 local manifest..."
 mkdir -p .repo/local_manifests
@@ -59,7 +59,7 @@ fi
 
 # 4. Sync source repositories
 echo "--> Syncing source repositories..."
-repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --current-branch --force-remove-dirty
+repo sync -c -j4 --force-sync --no-clone-bundle --no-tags --current-branch --force-remove-dirty
 
 # 5. Fallback clones (ensure all 10 trees exist)
 echo "--> Verifying device and hardware trees..."
@@ -73,6 +73,10 @@ echo "--> Verifying device and hardware trees..."
 [ ! -d "hardware/qcom-caf/sdm660/media" ] && git clone --depth=1 -b lineage-23.2-caf-msm8953 https://github.com/Zoro-15/android_hardware_qcom_media.git hardware/qcom-caf/sdm660/media
 [ ! -d "device/qcom/sepolicy-legacy-um" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/android_device_qcom_sepolicy.git device/qcom/sepolicy-legacy-um
 [ ! -d "hardware/lineage/compat" ] && git clone --depth=1 -b lineage-23.2 https://github.com/log1cs/android_hardware_lineage_compat.git hardware/lineage/compat
+
+# 5b. Post-sync storage reclamation (Purge .repo packfiles: frees ~25 GB)
+echo "--> Reclaiming storage: purging .repo/ packfiles..."
+rm -rf .repo/project-objects/ .repo/projects/
 
 # 6. Soong namespaces setup
 mkdir -p hardware/qcom-caf/sdm660 hardware/qcom-caf/msm8998
