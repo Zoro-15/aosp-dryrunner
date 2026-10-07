@@ -47,7 +47,7 @@ rm -rf device/qcom/sepolicy-legacy-um hardware/lineage/compat
 
 # 3. Base Manifest initialization & Local Manifest deployment
 echo "--> Initializing LineageOS 23.2 base manifest..."
-repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --git-lfs --depth=1 --groups=default,-darwin,-x86,-mips,-pdk
+repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --git-lfs --depth=1
 
 echo "--> Deploying PL2 local manifest..."
 mkdir -p .repo/local_manifests
@@ -99,12 +99,16 @@ elif [ -x "prebuilts/misc/linux-x86/ccache/ccache" ]; then
 fi
 
 # 8. Environment Setup & Lunch Target
-if [ ! -f "build/envsetup.sh" ]; then
-    echo "[FATAL] build/envsetup.sh not found. Source sync may have failed."
+if [ -f "build/envsetup.sh" ]; then
+    source build/envsetup.sh
+elif [ -f "build/make/envsetup.sh" ]; then
+    source build/make/envsetup.sh
+else
+    echo "[FATAL] Neither build/envsetup.sh nor build/make/envsetup.sh found. Source sync may have failed."
+    ls -la build/ 2>/dev/null || ls -la
     exit 1
 fi
 
-source build/envsetup.sh
 if lunch lineage_PL2-ap4a-userdebug 2>/dev/null; then
     echo "--> Selected lunch target: lineage_PL2-ap4a-userdebug"
 elif lunch lineage_PL2-bp1a-userdebug 2>/dev/null; then
