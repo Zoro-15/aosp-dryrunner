@@ -1,10 +1,16 @@
 name: "slice-slot"
 # =============================================================================
 #  Reusable slice slot — ONE idempotent campaign step.
-#  Early-exits (~2 min) when the pipeline INDEX says the target is done.
+#  Early-exits (~2 min) when the pipeline INDEX says the target is done;
+#  refuses to run when the last slice classified CAPACITY (deadlock guard).
 #  On cold starts: restores src-<mhash>, merges turbo prewarm states.
 #  On continuation: restores state-<key>-s<N> (exact ninja resume).
 #  Always banks its out/ back before finishing (zero redo by construction).
+#
+#  NOTE: forge.yml is the orchestrator of record (mining-matrix slots +
+#  postcheck + conveyor). This reusable wrapper is kept for external
+#  callers; it shares the same engine, so it inherits storage v2 + the
+#  capacity/DAG semantics automatically.
 # =============================================================================
 on:
   workflow_call:
@@ -23,7 +29,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: "Prepare storage volume"
-        run: sudo mkdir -p /mnt/romforge /opt/romforge && sudo chmod 1777 /mnt /mnt/romforge /opt /opt/romforge 2>/dev/null || true
+        run: |
+          sudo systemctl stop docker containerd 2>/dev/null || true
+          sudo rm -rf /var/lib/docker /var/lib/containerd 2>/dev/null || true
+          sudo mkdir -p /mnt/romforge /opt/romforge && sudo chmod 1777 /mnt /mnt/romforge /opt /opt/romforge 2>/dev/null || true
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: python3 -m pip install --quiet pyyaml

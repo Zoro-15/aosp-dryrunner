@@ -14,11 +14,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd rsync
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd rsync btrfs-progs
       - run: python3 -m pip install --quiet pyyaml
       - name: Config schema validation
         run: python3 -m forge_core.cli --root . validate
-      - name: Doctor (env self-report)
+      - name: "Doctor (env self-report: storage + silicon + disks)"
         run: python3 -m forge_core.cli --root . doctor
-      - name: Python unit tests (chunker, gate, relay)
+      - name: Python unit tests (chunker, gate, relay, storage, mine, dag)
         run: bash tests/run_tests.sh
+      - name: Extreme edge-case harness (engines A-L)
+        run: python3 harness/run_all.py
+      - name: Storage selftest (btrfs loop mount on a real runner)
+        run: |
+          python3 - <<'PY'
+          import json
+          from forge_core import storage
+          r = storage.selftest(size_mb=256)
+          print(json.dumps(r, indent=2))
+          # A real hosted runner has sudo + loop devices: btrfs must work.
+          # (Local/sandbox runs get a clean negative and skip, not fail.)
+          if not r.get("ok") and "no sudo" not in str(r.get("reason", "")):
+              raise SystemExit(f"storage selftest failed on CI: {r}")
+          PY
