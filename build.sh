@@ -100,6 +100,10 @@ echo "--> Verifying device and hardware trees..."
 [ ! -d "device/qcom/sepolicy-legacy-um" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/android_device_qcom_sepolicy.git device/qcom/sepolicy-legacy-um
 [ ! -d "hardware/lineage/compat" ] && git clone --depth=1 -b lineage-23.2 https://github.com/log1cs/android_hardware_lineage_compat.git hardware/lineage/compat
 
+# 5b. Post-sync storage reclamation (Zephyr's .repo purge technique)
+echo "--> Reclaiming storage: purging .repo/ git caches (frees ~20 GB)..."
+rm -rf .repo/
+
 # 6. Soong namespaces setup
 mkdir -p hardware/qcom-caf/sdm660 hardware/qcom-caf/msm8998
 [ ! -f "hardware/qcom-caf/sdm660/Android.bp" ] && echo "soong_namespace {}" > hardware/qcom-caf/sdm660/Android.bp
