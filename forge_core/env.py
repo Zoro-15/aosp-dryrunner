@@ -275,6 +275,37 @@ def ensure_swap(swap_path: str, size_gb: int = 8) -> bool:
     return False
 
 
+def activate_swap_chunk(chunk_path: str, chunk_size_gb: int = 2) -> bool:
+    """Dynamically allocate and activate an incremental swap chunk on-demand."""
+    try:
+        free = _df_free_gb(os.path.dirname(chunk_path))
+        if free < chunk_size_gb + 12:
+            return False
+        _safe_run(["sudo", "fallocate", "-l", f"{chunk_size_gb}G", chunk_path],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not os.path.exists(chunk_path) or os.path.getsize(chunk_path) < (chunk_size_gb * 1024 * 1024 * 1024):
+            _safe_run(["sudo", "dd", "if=/dev/zero", f"of={chunk_path}", "bs=1M", f"count={chunk_size_gb * 1024}", "status=none"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _safe_run(["sudo", "chmod", "600", chunk_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _safe_run(["sudo", "mkswap", chunk_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        r = _safe_run(["sudo", "swapon", "-p", "10", chunk_path], capture_output=True, text=True)
+        protect_runner_processes()
+        return bool(r and r.returncode == 0)
+    except Exception:
+        return False
+
+
+def deactivate_swap_chunks(swap_chunks: List[Path]) -> None:
+    """Deactivate and delete dynamic swap chunks to immediately reclaim disk space."""
+    for chunk in swap_chunks:
+        try:
+            _safe_run(["sudo", "swapoff", str(chunk)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if chunk.exists():
+                _safe_run(["sudo", "rm", "-f", str(chunk)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
 def install_pkgs(pkgs: List[str]) -> None:
     """Version-profile-driven apt install (JDK etc. come from versions.yaml)."""
     if not pkgs:
