@@ -8,6 +8,10 @@ Covers the load-bearing claims of the architecture:
   4. gate         — GOOD build passes; each POISON scenario FAILS the
                     specific check designed to catch it (anti-brick proof)
   5. config       — profile schema + slug keys
+  7. storage      — volume sizing math + the never-delete-source guard
+  8. dag          — conveyor decisions + done-requires-zip
+  9. engine       — stop_reason -> classification taxonomy
+ 10. mine         — silicon probe scoring + atomic claims + gate roles
 """
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from forge_core import chunker, config, gate, relay  # noqa: E402
+from forge_core import chunker, config, dag, engine, gate, mine, relay, storage  # noqa: E402
 from forge_core.store import FsStore  # noqa: E402
 
 PASS, FAIL = 0, 0
@@ -259,6 +263,197 @@ def test_config() -> None:
     check("device profile resolved", plan.device.codenames[0] == "PL2")
 
 
+# ---------------------------------------------------------------------------
+def test_storage(tmp: Path) -> None:
+    print("[7] storage v2 math + guards (pure parts)")
+    # sizing math
+    check("cap = free - reserve", storage.compute_cap_gb(75, 10) == 65.0)
+    check("cap floors at 0", storage.compute_cap_gb(5, 10) == 0.0)
+    check("reserve env parsing robust",
+          storage.VolumeState(mode="plain", reason="x").degraded)
+    st = storage.VolumeState(mode="btrfs", cap_gb=64.2, build_root="/v/aosp")
+    d = st.to_dict()
+    check("volume state serializes", d["mode"] == "btrfs"
+          and d["cap_gb"] == 64.2 and not d["reason"])
+
+    # plain-mode snapshot: logical == physical == df(path)
+    br = tmp / "snaproot"
+    br.mkdir()
+    snap = storage.snapshot(br)
+    check("snapshot plain on non-volume host", snap.mode in ("plain", "btrfs"))
+    if snap.mode == "plain":
+        check("plain snapshot logical==physical",
+              abs(snap.logical_free_gb - snap.physical_free_gb) < 0.01)
+    check("snapshot root free is real", snap.root_free_gb > 0)
+    check("snapshot serializes", set(snap.to_dict()) >= {
+        "mode", "physical_free_gb", "logical_free_gb", "root_free_gb", "cap_gb"})
+
+    # THE deadlock guard: pre-bank actions must never delete source in
+    # volume mode, no matter how low the disk gets
+    a = relay.pre_bank_actions(50, protect_source=True)
+    check("healthy: just purge-tmp", a == ["purge-tmp"], str(a))
+    a = relay.pre_bank_actions(1.5, protect_source=True)
+    check("volume + critically full: NO delete-source",
+          "delete-source" not in a and "stop:capacity" in a, str(a))
+    a = relay.pre_bank_actions(1.5, protect_source=False)
+    check("plain + critically full: legacy last resort",
+          "delete-source" in a, str(a))
+    a = relay.pre_bank_actions(3.0, protect_source=True)
+    check("low: ladder only", "reclaim-ladder" in a
+          and "fstrim" not in a and "delete-source" not in a, str(a))
+
+    # root purge list must NEVER touch runner internals (class B)
+    for p in storage.ROOT_PURGE_PATHS:
+        banned = ("/home/runner", "/var/log", "/opt/actions", "agent")
+        check(f"root purge safe: {p}", not any(b in p for b in banned))
+
+
+def test_dag() -> None:
+    print("[8] DAG conveyor decisions (pure)")
+    base = {"done": False, "slice": 3, "last_classification": "sliced"}
+    d = dag.next_action(dict(base))
+    check("sliced -> re-dispatch slice", d["phase"] == "slice", str(d))
+    d = dag.next_action({"done": True})
+    check("done -> verify", d["phase"] == "verify", str(d))
+    d = dag.next_action({"last_classification": "capacity", "slice": 2})
+    check("capacity -> fail (deadlock guard)", d["phase"] == "fail"
+          and "capacity" in d["reason"].lower(), str(d))
+    d = dag.next_action({"last_classification": "error", "slice": 2})
+    check("error -> fail (triage)", d["phase"] == "fail", str(d))
+    d = dag.next_action({"slice": dag.DEFAULT_MAX_SLICES})
+    check("budget exhausted -> fail", d["phase"] == "fail", str(d))
+    d = dag.next_action({"slice": 0})
+    check("cold start -> slice", d["phase"] == "slice", str(d))
+
+    # done-requires-zip (premature-verification bug, second half)
+    f = dag.finalize_classification("done", None)
+    check("rc==0 without zip -> error", f["classification"] == "error", str(f))
+    f = dag.finalize_classification("done", "rom.zip")
+    check("rc==0 with zip -> done", f["classification"] == "done")
+    f = dag.finalize_classification("sliced", None)
+    check("sliced stays sliced", f["classification"] == "sliced")
+
+    check("mining off -> solo", dag.mining_matrix(False) == ["solo"])
+    m = dag.mining_matrix(True, 12)
+    check("mining matrix 12 candidates", len(m) == 12
+          and m[0] == "c01" and m[-1] == "c12", str(m))
+    check("mining matrix capped", len(dag.mining_matrix(True, 99)) == 24)
+    check("lock tag flat", dag.lock_tag("k", "42", "3")
+          == "lock-k-r42-s3")
+
+
+def test_engine_taxonomy() -> None:
+    print("[9] engine stop_reason -> classification taxonomy")
+    E = engine
+    check("rc 0 -> done", E.classify_exit(0, False, "", 10, 100) == "done")
+    check("disk -> capacity", E.classify_exit(1, True, E.STOP_DISK, 10, 100)
+          == "capacity")
+    check("budget -> sliced", E.classify_exit(1, True, E.STOP_BUDGET, 10, 100)
+          == "sliced")
+    check("root-disk -> sliced (recoverable)",
+          E.classify_exit(1, True, E.STOP_ROOT_DISK, 10, 100) == "sliced")
+    check("rc!=0 clean -> error",
+          E.classify_exit(2, False, "", 10, 100) == "error")
+    check("elapsed~budget -> sliced (SIGINT raced exit)",
+          E.classify_exit(1, False, "", 98, 100) == "sliced")
+    # thresholds sanity: watchdogs trip in the right order
+    check("root stop < root purge",
+          E.ROOT_STOP_GB < E.ROOT_PURGE_GB)
+    check("phys stop < phys warn", E.PHYS_STOP_GB < E.PHYS_WARN_GB)
+
+
+# ---------------------------------------------------------------------------
+CPUINFO_TARGET = (
+    "processor\t: 0\nvendor_id\t: AuthenticAMD\n"
+    "model name\t: AMD EPYC 9V45 24-Core Processor\n"
+    "cpu MHz\t\t: 4400.000\n"
+    "flags\t\t: fpu avx2 avx512f sse4_2\n") * 2
+CPUINFO_WEAK = (
+    "processor\t: 0\n"
+    "model name\t: AMD EPYC 7763 64-Core Processor\n"
+    "cpu MHz\t\t: 2400.000\n"
+    "flags\t\t: fpu avx2 sse4_2\n") * 2
+CPUINFO_INTEL = (
+    "processor\t: 0\n"
+    "model name\t: Intel(R) Xeon(R) Gold 6230R CPU @ 2.10GHz\n"
+    "cpu MHz\t\t: 2100.000\n" "flags\t\t: fpu avx2\n") * 2
+
+
+def test_mine(tmp: Path) -> None:
+    print("[10] silicon mining: probe, claims, gate")
+    ci = tmp / "cpuinfo"
+    ci.write_text(CPUINFO_TARGET)
+    info = mine.probe(str(ci))
+    check("target probe scores >= 90", int(info["score"]) >= 90, str(info))
+    check("target probe detects avx512", info["avx512"])
+    ci.write_text(CPUINFO_WEAK)
+    info = mine.probe(str(ci))
+    check("zen3 probe scores low", 0 < int(info["score"]) < 90, str(info))
+    check("zen3 probe no avx512 bonus", not info["avx512"])
+    ci.write_text(CPUINFO_INTEL)
+    info = mine.probe(str(ci))
+    check("cascade lake probe scores low", 0 < int(info["score"]) < 90)
+
+    # atomic claims: exactly one winner
+    st = FsStore(tmp / "mine-store")
+    won1 = st.claim("lock-k-r1-s1", "t", "n")
+    won2 = st.claim("lock-k-r1-s1", "t", "n")
+    check("claim is exactly-one-winner", won1 and not won2)
+    check("gc_locks drops only matching prefix",
+          st.gc_locks("k") == ["lock-k-r1-s1"])
+
+    # gate roles via a fake probe + fake clock/sleep
+    real_probe = mine.probe
+    try:
+        mine.probe = lambda path="/proc/cpuinfo": {"model": "EPYC 9V45",
+                                                  "score": 100, "class": "t",
+                                                  "avx512": True, "mhz": 4400,
+                                                  "cores": 4}
+        st2 = FsStore(tmp / "mine-store2")
+        r = mine.gate(st2, "lock-g1", key="", min_score=90, wait_s=10,
+                      sleep_fn=lambda s: None,
+                      clock_fn=lambda: 1000.0)
+        check("target silicon -> builder", r["role"] == "builder", str(r))
+        st3 = FsStore(tmp / "mine-store3")
+        st3.claim("lock-g2", "t", "n")     # someone already holds it
+        r = mine.gate(st3, "lock-g2", key="", min_score=90, wait_s=10,
+                      sleep_fn=lambda s: None, clock_fn=lambda: 1000.0)
+        check("target silicon, lock held -> discarded",
+              r["role"] == "discarded", str(r))
+
+        mine.probe = lambda path="/proc/cpuinfo": {"model": "EPYC 7763",
+                                                  "score": 40, "class": "w",
+                                                  "avx512": False, "mhz": 2400,
+                                                  "cores": 4}
+        t = {"t": 0.0}
+        st4 = FsStore(tmp / "mine-store4")
+        r = mine.gate(st4, "lock-g3", key="", min_score=90, wait_s=10,
+                      sleep_fn=lambda s: None,
+                      clock_fn=lambda: t.__setitem__("t", t["t"] + 5) or t["t"])
+        check("non-target, nobody claims -> fallback builder",
+              r["role"] == "builder" and "fallback" in r["reason"], str(r))
+
+        st5 = FsStore(tmp / "mine-store5")
+        st5.claim("lock-g4", "t", "n")
+        r = mine.gate(st5, "lock-g4", key="", min_score=90, wait_s=10,
+                      sleep_fn=lambda s: None,
+                      clock_fn=lambda: t.__setitem__("t", t["t"] + 5) or t["t"])
+        check("non-target, lock held at deadline -> discarded",
+              r["role"] == "discarded", str(r))
+
+        # INDEX done short-circuit: no lock touched at all
+        from forge_core.store import Router
+        st6 = Router(backend="fs", fs_root=tmp / "mine-store6")
+        st6.target_update("somekey", done=True)
+        r = mine.gate(st6, "lock-g5", key="somekey", min_score=90,
+                      wait_s=10, sleep_fn=lambda s: None,
+                      clock_fn=lambda: 1000.0)
+        check("INDEX done -> role done (no-op)", r["role"] == "done", str(r))
+        check("done role left no lock", not st6.exists("lock-g5"))
+    finally:
+        mine.probe = real_probe
+
+
 def test_e2e_plumbing(tmp: Path) -> None:
     print("[6] e2e store plumbing (syncer.snapshot + relay bank/restore)")
     from forge_core import syncer
@@ -309,6 +504,10 @@ def main() -> int:
         test_gate(tmp)
         test_e2e_plumbing(tmp)
         test_config()
+        test_storage(tmp)
+        test_dag()
+        test_engine_taxonomy()
+        test_mine(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{'ALL GREEN' if FAIL == 0 else 'FAILURES'}: {PASS} passed, "

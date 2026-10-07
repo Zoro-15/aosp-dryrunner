@@ -239,6 +239,43 @@ slice-stop with a bankable, consistent state. ENOSPC mid-link becomes
 structurally unreachable; at worst it becomes "slice ended 40 min
 early, resume next slot".
 
+### 5.4 The /mnt capacity deadlock, and Storage v2 (runs #30/#34–#36)
+
+The arithmetic: git-stripped source (~35 GiB) + warm out/ (~40 GiB) is
+~75 GiB LOGICAL on a 65–75 GiB PHYSICAL mount — never fits. The failure
+loop it produced: restore lands at ~0 GiB free → watchdog SIGINTs within
+30 s of build start → slice classifies `sliced`, banks → pre-bank
+cleanup DELETES the source tree to make room (~21 GiB) → next slot
+re-downloads 35 GiB for another 30 s of build. Six identical cycles per
+run, zero net progress, then `verify` fired anyway and died on
+"no ROM zip" — a perfect livelock wearing a progress bar.
+
+**Storage v2** mounts the entire working set (source + out/) on a
+btrfs `compress=zstd:1` loop volume (hard-capped sparse image on
+`<best-mount>/romforge/forge.img`, reserve held back). AOSP is mostly
+text: ~2.2–3.0× compression source-side, ~1.4–1.8× object-side — the
+75 GiB logical set becomes ~35–45 GiB physical, and 15–25 GiB of /mnt
+stay free at all times. mtimes/permissions/contents are byte-identical
+through the volume (exact-resume contract intact); `fstrim` returns
+deleted bytes to the backing mount; ANY provisioning failure degrades
+to the plain layout honestly (CI selftests the btrfs path).
+
+**The taxonomy fix that makes loops impossible**: slice results now
+carry `stop_reason` (`budget | disk | root-disk`). Disk stops classify
+`capacity`, not `sliced` — and the DAG (§6.5) REFUSES to re-dispatch on
+capacity. Pre-bank cleanup can never delete the source in volume mode
+(`relay.pre_bank_actions` is pure and unit-tested for exactly this).
+
+### 5.5 Root-disk guard (failure class B, runs #16–#21)
+
+actions-runner diagnostics fill `/` until the daemon loses comms and
+GitHub evicts the VM mid-build — the slice dies unbanked. The engine
+now watches `/` as a third surface: below 1.5 GiB it purges ONLY safe
+caches (pip/npm/apt/oversized forge logs — never `/home/runner`,
+`/var/log`, or `/opt/actions-runner`); below 0.8 GiB after the purge it
+SIGINTs early and banks, converting an eviction into an honest
+`sliced` resume.
+
 ---
 
 ## 6. Time engineering (solution to "under 6 h, parallelized")
@@ -294,6 +331,40 @@ sandwiched between two correctness mechanisms:
 
 Turbo failures degrade to time, never to safety. This is stated in the
 UI of every campaign: `turbo: enabled (experimental acceleration)`.
+
+### 6.4 Silicon mining (buying better compute, not more of it)
+
+GitHub does not let you request a CPU — but a matrix of identical
+candidate shards can self-select. Each slot fans out ~8 candidates;
+each probes `/proc/cpuinfo` for ~50 ms against the fleet census
+(Zen 5 Turin 100 · Granite Rapids 95 · Zen 4 Genoa 85 · Zen 3 Milan 40,
++8 for AVX-512). Target silicon atomically claims the slot lock
+(`gh release create` is serialized server-side; the loser gets 422);
+non-target candidates wait out a 240 s scoreboard, then the best
+remaining candidate claims as fallback — a slot NEVER stalls, worst
+case it builds on the pool's default Zen 3.
+
+The economics: P(≥1 target in 8 candidates) ≈ 82% per slot; a discard
+costs ~1 min of runner time (free on public repos). A Zen 5 slot runs
+soong/javac/ninja ~1.55–1.65× faster than Zen 3 — effectively turning
+six 275-min slots into roughly four. Pairs with the exact-resume relay:
+the slot's banked state is silicon-agnostic.
+
+### 6.5 The conveyor (unlimited chaining without a required PAT)
+
+Slots 1–6 chain in-run via `needs:`. When the run ends still
+`sliced`, the **postcheck** job probes INDEX and emits `phase` — the
+single authority for what happens next (verify / slice / fail). On
+`phase=slice` the **conveyor** re-dispatches `forge.yml`; the queued run
+(concurrency group, `cancel-in-progress: false`) resumes at slice N+1
+with exact ninja resume, and slots early-exit once `done`.
+
+`github.token` cannot trigger workflow_dispatch (anti-recursion rule),
+so continuous mode wants the optional `FORGE_DISPATCH_TOKEN` secret
+(PAT, workflow scope). Without it: the run ends green and the weekly
+cron catch-up resumes the campaign — honest, documented, zero stall.
+`phase=fail` (capacity / error / budget-exhausted) goes RED and stops
+the loop: the storage deadlock can never quietly burn another week.
 
 ---
 
@@ -415,8 +486,25 @@ control of every cause we can control*:
 [4b] gate poisons                — 5 poisoned builds each FAIL their check
 [6] e2e store plumbing           — snapshot→restore, bank→resume, exclusions
 [5] config schema                — profiles, slugs, version wiring
-ALL GREEN: 40 passed, 0 failed
+[7] storage v2 math + guards     — cap sizing, degraded states,
+                                   never-delete-source decision table,
+                                   root-purge path safety
+[8] DAG conveyor decisions       — exhaustive INDEX→phase table,
+                                   done-requires-zip, mining matrix
+[9] engine taxonomy              — stop_reason→classification matrix,
+                                   threshold ordering
+[10] silicon mining              — probe scoring (fleet census models),
+                                   atomic claims, gate roles, fallback
+ALL GREEN: 93 passed, 0 failed
 ```
+
+Plus the 12-engine extreme edge-case harness (`python3 harness/run_all.py`):
+engines A–J as before, plus **K** (Storage v2: sizing, degradation,
+root-disk purge safety, 16-thread claim contention) and **L** (DAG
+decision table, mine scoring/gating, and YAML-level assertions that the
+orchestrator wiring actually contains the four structural fixes —
+phase-gated verify, postcheck+conveyor, mining matrices with
+role-gated build steps, CI triggers on main).
 
 ---
 

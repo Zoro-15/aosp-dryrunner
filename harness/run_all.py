@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runner for the full ROMForge Extreme Edge-Case Test Harness (Engines A through J)."""
+"""Runner for the full ROMForge Extreme Edge-Case Test Harness (Engines A through L)."""
 import os
 import sys
 import time
@@ -13,7 +13,7 @@ sys.path.insert(0, str(root))
 
 def main():
     print("=" * 70)
-    print("  ROMForge 10-Engine Extreme Edge-Case Harness (A through J)")
+    print("  ROMForge 12-Engine Extreme Edge-Case Harness (A through L)")
     print("=" * 70)
 
     loader = unittest.TestLoader()
@@ -29,7 +29,7 @@ def main():
     print(f"Tests run: {result.testsRun} | Failures: {len(result.failures)} | Errors: {len(result.errors)}")
 
     if result.wasSuccessful():
-        print("\033[92mALL 10 HARNESS ENGINES PASSED GREEN!\033[0m")
+        print("\033[92mALL 12 HARNESS ENGINES PASSED GREEN!\033[0m")
         return 0
     else:
         print("\033[91mHARNESS FAILED — FIX REGRESSIONS BEFORE COMMITTING\033[0m")

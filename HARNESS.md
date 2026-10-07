@@ -103,6 +103,24 @@ A robust local harness needs to simulate GitHub Actions' exact constraints and p
 
 ---
 
+#### K. Storage v2 — Volume Sizing, Degradation & Root-Disk Purge Guard
+
+* **The Problem**: The /mnt capacity deadlock (runs #30/#34–#36) was an arithmetic failure: ~75 GiB logical working set on a ~65–75 GiB physical mount, plus a pre-bank cleanup that deleted the source tree, producing a 30-minute re-download per 30 seconds of build.
+* **The Harness Solution (`harness/test_storage_engine.py`)**:
+  * Exhaustive cap-math table (free − reserve, floored at 0) across mount sizes.
+  * `FORGE_NO_VOLUME=1` forces honest plain-mode degradation; every degraded state must carry a reason.
+  * The pure decision function `relay.pre_bank_actions` is table-tested: **volume mode must NEVER schedule `delete-source`** at ANY free-space level; plain mode degrades to the legacy last resort.
+  * Root-purge path safety: the emergency purge list must never contain `/home/runner`, `/var/log`, `/opt/actions-runner`, `agent`, or `_diag` (failure class B: runner eviction).
+  * Atomic claims stay exactly-one-winner under a 16-thread barrier race on one shared lock tag.
+  * Engine watchdog thresholds must be ordered (purge before stop, warn before stop).
+
+#### L. DAG Conveyor, Silicon Mining & Workflow Wiring Invariants
+
+* **The Problem**: The premature-verification bug (runs #30/#34/#35/#36) was a SEMANTIC error in the workflow YAML, not in Python — `verify` fired on slot count, not on INDEX state. Unit tests could not see it.
+* **The Harness Solution (`harness/test_dag_mining.py`)**:
+  * Python layer: exhaustive `dag.next_action` decision table — capacity/error/exhausted NEVER resume; done-with-stale-classification still verifies; `finalize_classification` enforces done-requires-zip; `engine.classify_exit` stop-reason matrix; mine probe scoring against the fleet census models; gate fallback never stalls.
+  * YAML layer (PyYAML): `forge.yml` must gate `verify` on `postcheck.outputs.phase == 'verify'` (INDEX authority); postcheck+conveyor jobs must exist; every slot must be a mining matrix whose gate runs BEFORE the build step; build steps must be role-gated on `build_gate.outputs.role == 'builder'`; `ci-tests.yml` must actually trigger on `main` (catches the corrupted `branches: ain, master]` bug that silently disabled CI).
+
 ### 2. How This Solves the Edge Case Problem
 
 With this comprehensive 10-part harness:

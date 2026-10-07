@@ -33,22 +33,31 @@ ROMForge is a continuous integration compilation framework designed to build pro
                   │                               │                               │
                   └───────────────────────────────┼───────────────────────────────┘
                                                   ▼
-                                          [ slot-1 (build) ]
-                             (Merge turbo partition states into out/ tree;
-                              execute framework/ART/system critical path)
+                                  [ slot-1 .. slot-6 (mining matrix) ]
+                     (8 runner candidates per slot probe /proc/cpuinfo;
+                      best silicon atomically claims the slot lock and
+                      builds — the rest fast-discard in <1 min;
+                      slot-1 merges turbo partition states into out/ tree;
+                      exact-resume relay: restore out/ + .ninja_log
+                      between slots)
                                                   │
                                                   ▼
-                                          [ slot-2 (build) ]
-                            (Exact-resume relay: restore out/ + .ninja_log)
-                                                  │
-                                                  ▼
-                                          [ verify & gate ]
-                                (14-Point Anti-Brick Verification Suite)
-                                                  │
-                                                  ▼
-                                         [ publish release ]
-                             (ROM payload, SHA256SUMS, flash-guarded.sh,
-                              SAFETY_REPORT.json, rescue boot/dtbo/vbmeta)
+                                    [ postcheck: probe INDEX -> phase ]
+                          (done?  capacity?  error?  sliced?  exhausted?)
+                         ┌────────────────┬───────────────┬─────────────┐
+                         ▼                ▼               │             ▼
+                 [ verify & gate ]   [ conveyor ]         │    [ run goes RED ]
+                (ONLY if done=true: (phase=slice:      │    (phase=fail: capacity
+                 14-Point Anti-Brick  re-dispatch the   │     / error / budget —
+                 Verification Suite)   workflow; slots  │     never loop the
+                         │              resume exactly) │     deadlock again)
+                         ▼                                │
+                 [ publish release ]  (no dispatch token? │
+                  (ROM payload,        weekly cron catch- │
+                   SHA256SUMS,          up resumes the    │
+                   flash-guarded.sh,    campaign)         │
+                   SAFETY_REPORT.json,                    │
+                    rescue boot/dtbo/vbmeta)              │
 ```
 
 ---
@@ -92,32 +101,69 @@ Pipeline:
 
 ---
 
-### 3. Ephemeral Mount Layout & Reclaim Ladder (`forge_core/env.py`, `forge_core/engine.py`)
+### 3. Storage v2 — Compressed Build Volume & Three-Surface Watchdogs (`forge_core/storage.py`, `forge_core/engine.py`)
 
 GitHub Actions standard runners supply two primary storage locations:
 * `/` (Root filesystem): ~14–25 GiB usable capacity.
-* `/mnt` (Secondary ephemeral mount): ~65 GiB usable capacity.
+* `/mnt` (Secondary ephemeral mount): ~65–75 GiB usable capacity.
+
+The unsolvable arithmetic that killed runs #30/#34–#36: a git-stripped
+AOSP source tree (~35 GiB) plus a warm `out/` (~40 GiB) is ~75 GiB of
+**logical** data on a ~65–75 GiB **physical** mount — the working set
+never fits, the disk watchdog SIGINTs within 30 s of build start, and
+the pre-bank cleanup deletes the source to bank, forcing the next slot
+to re-download 35 GiB for another 30 seconds of build. A perfect
+storage livelock that masqueraded as "progress".
+
+**Storage v2** puts the ENTIRE working set on a transparent-compression
+volume:
 
 ```
-Storage Ledger (Typical Android 10/11 Tree):
-┌────────────────────────────────────────────────────────┬─────────────┐
-│ Component                                              │ Footprint   │
-├────────────────────────────────────────────────────────┼─────────────┤
-│ Git-stripped, shallow source tree (AOSP core + vendor) │ ~33–35 GiB  │
-│ Active out/ target directory (excluding symbols)       │ ~28–36 GiB  │
-│ Swap allocation (dd block-allocated, non-sparse)       │ 4.0 GiB     │
-│ Zero-staging streaming relay parts in flight           │ 0.0 GiB     │
-├────────────────────────────────────────────────────────┼─────────────┤
-│ Total Peak Allocated Footprint                         │ ~65–75 GiB  │
-└────────────────────────────────────────────────────────┴─────────────┘
+<mount>/romforge/                 (raw ext4/xfs — the backing dir)
+    forge.img                    (sparse btrfs loop file, hard-capped:
+                                  free_bytes - FORGE_VOLUME_RESERVE_GB)
+    vol/                         (mountpoint: btrfs compress=zstd:1,noatime)
+        aosp/                    (BUILD_ROOT: source + out/)
+    tmp/                         (TMPDIR + caches — raw, uncompressed)
+    .forge-swap                  (raw — swapfiles on btrfs are unsafe)
 ```
 
-**Proactive Disk Watchdog & Reclaim Ladder:**
-A background monitoring thread polls available mount capacity every 60 seconds. If storage crosses the safety margin, the reclaim ladder executes safe, non-critical purges in descending order:
-1. `out/target/product/*/symbols`: Unstripped binary copies (Ninja re-links stripped outputs in minutes if requested).
-2. `out/target/product/*/obj/*/oat_x86*`: Host unit-testing dex caches.
-3. `out/target/product/*/*.img.new`: Stale intermediate filesystem image assemblies.
-4. **Early Bank Trigger:** If storage remains critical, the engine issues a controlled `SIGINT` to gracefully serialize the Ninja build graph and finalize the slice, preventing unrecoverable linker `ENOSPC` crashes.
+* AOSP is overwhelmingly text (java/xml/blueprint/headers) and compresses
+  ~2.2–3.0× with `zstd:1`; object files ~1.4–1.8×. The 75 GiB logical
+  working set becomes ~35–45 GiB of physical extents, leaving 15–25 GiB
+  of `/mnt` free at all times.
+* **Determinism preserved**: mtimes, permissions and contents are
+  byte-identical through the volume — the exact-resume ninja contract
+  (`.ninja_log`, `.ninja_deps`, mtimes) is untouched.
+* **Hard-capped**: the loop file is sized at creation; the build can
+  starve ITSELF (watchdogs see it) but can never surprise the runner or
+  the actions daemon.
+* `fstrim` punches holes in the sparse backing file: deletes (pre-bank
+  junk, reclaim ladder) actually return bytes to `/mnt`.
+* **Honest degradation**: no btrfs-progs / no loop devices / no sudo →
+  plain-directory layout with tightened watchdogs, never a hard abort.
+  CI runs a btrfs selftest so regressions surface immediately.
+
+**Three-surface watchdogs** (`engine.py`):
+
+| Surface | Thresholds | Response |
+|---|---|---|
+| `/` (runner daemon) | <1.5 GiB purge → <0.8 GiB stop | emergency cache purge, then early bank (prevents runner eviction, failure class B) |
+| backing mount (physical) | <4 GiB warn → <2 GiB stop | `fstrim` + reclaim ladder |
+| volume (logical) | ladder at `min_free+4` → <2 GiB stop | reclaim ladder, then **classification=capacity** |
+
+**Stop-reason taxonomy** — the slice result now carries `stop_reason`
+(`budget | disk | root-disk`), and classification maps it:
+`budget`/`root-disk` → `sliced` (transient, resume); `disk` →
+`capacity` (structural — the DAG **refuses to re-dispatch**; see §7).
+The old code classified every watchdog stop as `sliced`, which is
+exactly what looped the deadlock forever.
+
+**Pre-bank cleanup can never delete the source tree in volume mode**
+(`relay.pre_bank_actions`): space comes from fstrim + the ladder, and if
+that is not enough the slice is classified `capacity` and the campaign
+halts honestly instead of paying 30-minute re-downloads for 30 seconds
+of build.
 
 ---
 
@@ -156,6 +202,70 @@ Every published release includes `SAFETY_REPORT.json` and `flash-guarded.sh`, wh
 
 ---
 
+### 6. Silicon Mining — Deterministic Fast-Discard Runner Selection (`forge_core/mine.py`)
+
+GitHub assigns runners from a shared pool; a CPU cannot be requested. But
+a matrix of identical candidate shards CAN self-select: every candidate
+probes `/proc/cpuinfo` (~50 ms, census-informed scoring), and non-target
+silicon exits in under a minute (GitHub pulls the next runner from the
+queue). One atomic lock guarantees exactly ONE candidate per slot builds.
+
+```
+Fleet census (HFT-Proj exp/fleet-silicon-census, 2k nodes)   score
+EPYC 9V45/9V44   Zen5 Turin    4.34-4.56 GHz   14.05%        100
+Xeon 6973P-C     Granite Rpts  4.01-4.20 GHz    3.20%         95
+EPYC 9V74        Zen4c Genoa-X 3.70 GHz        16.80%         85
+EPYC 7763        Zen3 Milan    3.24 GHz        55.15%         40
++8 for AVX-512 (soong/javac/zstd lean on 512-bit paths)
+```
+
+* **Atomic claim**: `gh release create` is serialized server-side (the
+  loser gets HTTP 422 `already_exists`); FsStore uses atomic `os.mkdir`.
+  Both are exactly-one-winner — verified under 16-thread contention.
+* **Scoreboard fallback**: non-target candidates wait out a 240 s
+  scoreboard; if no target silicon has claimed, the best available
+  candidate claims instead. P(>=1 Zen5/Granite in 8 candidates) ~ 82%,
+  and a slot NEVER stalls on the silicon lottery — worst case it builds
+  on Zen 3 exactly like before.
+* **Zero cost**: a discarded candidate burns ~1 min of runner time; on
+  public repos runner-minutes are free.
+* **stdlib-only import chain**: candidates run
+  `python3 -m forge_core.mine gate ...` directly after checkout, before
+  setup-python/pip.
+
+### 7. DAG Conveyor — INDEX-Authoritative Phase Decisions (`forge_core/dag.py`)
+
+The premature-verification bug (runs #30/#34–#36) was a workflow SEMANTIC
+error: `verify` fired after slot-6 via `always()` regardless of what
+`INDEX.json` said, restored an incomplete `out/`, and died on
+"no ROM zip to verify" — a red herring that cost 30 min per occurrence.
+
+Fix — the workflow never guesses; it reads the coordination record:
+
+| INDEX state | phase | Action |
+|---|---|---|
+| `done=true` (ROM zip banked) | `verify` | run the 14-point gate + publish |
+| last slice `sliced` | `slice` | conveyor re-dispatches (or weekly cron resumes) |
+| last slice `capacity` | `fail` | RED — refuse to loop the storage deadlock |
+| last slice `error` | `fail` | RED — human triages the forensics log |
+| slice count >= 24 | `fail` | RED — budget exhausted honestly |
+
+The second half of the bug is also fixed in code: `done` is only real
+when a flashable zip actually materialized
+(`dag.finalize_classification`: rc==0 without a zip is an `error`, not
+`done`).
+
+**The conveyor** re-dispatches `forge.yml` when `phase=slice` so a
+campaign continues run-over-run (35-day workflow ceiling, slots
+early-exit once done). `GITHUB_TOKEN` cannot trigger workflow_dispatch
+(GitHub blocks token-generated events), so continuous mode needs the
+optional `FORGE_DISPATCH_TOKEN` repo secret (PAT with `workflow` scope);
+without it the run ends green and the weekly cron catch-up (Mon 03:17
+UTC) resumes the campaign — never a silent stall, never an infinite
+loop.
+
+---
+
 ## Repository Structure
 
 ```
@@ -190,7 +300,7 @@ Every published release includes `SAFETY_REPORT.json` and `flash-guarded.sh`, wh
 │   ├── ADD_ROM.md                # Guide for adding new ROM definitions
 │   └── SAFETY.md                 # Unbrick procedures, safety invariants, and flashing
 ├── patches/                      # Injectable device/vendor hardware patches
-├── tests/                        # 40-assertion offline unit & integration test suite
+├── tests/                        # 93-assertion offline unit & integration test suite
 │   └── run_tests.sh
 └── forge                         # CLI entrypoint executable
 ```
@@ -293,7 +403,7 @@ ROMForge is self-contained and CI-agnostic. All subsystems can be executed local
 # Run dry-run execution plan and calculate mhash fingerprint
 ./forge plan --rom qassa-a10
 
-# Run complete 40-assertion offline unit and integration suite
+# Run complete 93-assertion offline unit and integration suite
 bash tests/run_tests.sh
 ```
 
