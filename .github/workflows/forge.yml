@@ -180,7 +180,12 @@ jobs:
         run: python3 -m forge_core.cli --root . prepare --rom "${{ github.event.inputs.rom || 'qassa-a10' }}"
       - name: "Shallow sync + bank content-addressed snapshot"
         env: { GH_TOKEN: "${{ github.token }}" }
-        run: python3 -m forge_core.cli --root . sync --rom "${{ github.event.inputs.rom || 'qassa-a10' }}"
+        run: |
+          FORCE_FLAG=""
+          if [ "${{ github.event.inputs.force_sync }}" = "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+          python3 -m forge_core.cli --root . sync --rom "${{ github.event.inputs.rom || 'qassa-a10' }}" $FORCE_FLAG
 
   # --------------------------------------------------------------------------
   turbo:
