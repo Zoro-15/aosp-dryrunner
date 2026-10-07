@@ -81,10 +81,20 @@ class ReleaseStore:
         if target:
             args += ["--target", target]
         else:
-            args += ["--target", "main"]
-        r = self._gh(*args, check=False)
-        if r.returncode != 0:  # race or already exists — fine
-            log.warn(f"release create {tag}: {r.stderr.strip()[:120]}")
+            args += ["--target", os.environ.get("GITHUB_REF_NAME", "main")]
+        last_err = ""
+        for attempt in range(3):
+            r = self._gh(*args, check=False)
+            if r.returncode == 0:
+                return
+            err_msg = (r.stderr or "").strip()
+            last_err = err_msg
+            if "already_exists" in err_msg.lower() or "already exists" in err_msg.lower():
+                return
+            log.warn(f"release create {tag} attempt {attempt + 1}/3 failed: {err_msg[:120]}")
+            time.sleep(5 * (attempt + 1))
+        if not self.exists(tag):
+            raise StoreError(f"release create {tag} failed after retries: {last_err[:160]}")
 
     def delete(self, tag: str, cleanup_tag: bool = True) -> None:
         args = ["release", "delete", tag, "--yes"]
