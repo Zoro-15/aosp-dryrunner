@@ -46,44 +46,26 @@ rm -rf hardware/qcom-caf/sdm660 hardware/qcom-caf/msm8998
 rm -rf device/qcom/sepolicy-legacy-um hardware/lineage/compat
 
 # 3. Base Manifest initialization & Local Manifest deployment
-echo "--> Initializing LineageOS 23.2 base manifest..."
-repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --git-lfs --depth=1
+echo "--> Initializing LineageOS 23.2 base manifest (lean mode)..."
+repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 \
+    --git-lfs --depth=1 \
+    -g default,-darwin,-windows,-cts,-vts,-test
 
 echo "--> Deploying PL2 local manifest..."
 mkdir -p .repo/local_manifests
 if [ -f "manifests/PL2.xml" ]; then
     cp manifests/PL2.xml .repo/local_manifests/PL2.xml
-else
-    cat << "EOF" > .repo/local_manifests/PL2.xml
-<?xml version="1.0" encoding="UTF-8"?>
-<manifest>
-  <remove-project name="LineageOS/android_hardware_qcom_audio" />
-  <remove-project name="LineageOS/android_hardware_qcom_display" />
-  <remove-project name="LineageOS/android_hardware_qcom_media" />
-  <remove-project name="LineageOS/android_device_qcom_sepolicy" />
-  <remove-project name="LineageOS/android_hardware_lineage_compat" />
-
-  <project path="device/nokia/sdm660-common" name="Zoro-15/android_device_nokia_sdm660-common" remote="github" revision="lineage-23.2" />
-  <project path="device/nokia/PL2" name="Zoro-15/android_device_nokia_PL2" remote="github" revision="lineage-23.2" />
-  <project path="vendor/nokia/sdm660-common" name="Zoro-15/proprietary_vendor_nokia_sdm660-common" remote="github" revision="lineage-23.2" />
-  <project path="vendor/nokia/PL2" name="Zoro-15/proprietary_vendor_nokia_PL2" remote="github" revision="lineage-23.2" />
-  <project path="kernel/nokia/sdm660" name="Zoro-15/android_kernel_nokia_PL2_16" remote="github" revision="lineage-23.2" />
-  <project path="hardware/qcom-caf/sdm660/audio" name="Zoro-15/android_hardware_qcom_audio" remote="github" revision="lineage-23.2" />
-  <project path="hardware/qcom-caf/sdm660/display" name="Zoro-15/android_hardware_qcom_display" remote="github" revision="lineage-23.2-caf-msm8953" />
-  <project path="hardware/qcom-caf/sdm660/media" name="Zoro-15/android_hardware_qcom_media" remote="github" revision="lineage-23.2-caf-msm8953" />
-  <project path="device/qcom/sepolicy-legacy-um" name="Zoro-15/android_device_qcom_sepolicy" remote="github" revision="lineage-23.2" />
-  <project path="hardware/lineage/compat" name="log1cs/android_hardware_lineage_compat" remote="github" revision="lineage-23.2" />
-</manifest>
-EOF
+elif [ -n "$ORIGIN_DIR" ] && [ -f "$ORIGIN_DIR/manifests/PL2.xml" ]; then
+    cp "$ORIGIN_DIR/manifests/PL2.xml" .repo/local_manifests/PL2.xml
 fi
 
-# 4. Sync source repositories
+# 4. Sync source repositories (optimized bandwidth & storage)
 echo "--> Syncing source repositories..."
 set +e
 if [ -f "/opt/crave/resync.sh" ]; then
     /opt/crave/resync.sh
 else
-    repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --force-remove-dirty
+    repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --current-branch --force-remove-dirty
 fi
 set -e
 
@@ -100,8 +82,8 @@ echo "--> Verifying device and hardware trees..."
 [ ! -d "device/qcom/sepolicy-legacy-um" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/android_device_qcom_sepolicy.git device/qcom/sepolicy-legacy-um
 [ ! -d "hardware/lineage/compat" ] && git clone --depth=1 -b lineage-23.2 https://github.com/log1cs/android_hardware_lineage_compat.git hardware/lineage/compat
 
-# 5b. Post-sync storage reclamation (Zephyr's .repo purge technique)
-echo "--> Reclaiming storage: purging .repo/ git caches (frees ~20 GB)..."
+# 5b. Post-sync storage reclamation (Purge .repo git caches: frees ~20 GB)
+echo "--> Reclaiming storage: purging .repo/ packfiles..."
 rm -rf .repo/
 
 # 6. Soong namespaces setup
