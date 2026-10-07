@@ -3,6 +3,7 @@
 Simulates heavy Java/Dex heap limits and verifies that swap configuration,
 _JAVA_OPTIONS, and toolchain worker ceilings are strictly validated.
 """
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -26,9 +27,21 @@ class TestOomSwap(unittest.TestCase):
 
     def test_ensure_swap_skips_when_disk_critically_low(self):
         """Swap creation must protect disk budget if host free disk is low."""
-        with patch("forge_core.env._df_free_gb", return_value=5.0):
+        # Hermetic: simulate a host with NO active swap. GitHub runners ship
+        # with /mnt/swapfile already swapon'd, which short-circuits
+        # ensure_swap() to True before the disk-budget branch can run. This
+        # only surfaced once ci-tests.yml triggers were repaired and the
+        # test executed on a real runner for the first time.
+        no_swap = subprocess.CompletedProcess(["swapon", "--show"], 0,
+                                              stdout="", stderr="")
+
+        def fake_safe_run(cmd, **kwargs):
+            return no_swap if cmd and cmd[0] == "swapon" else None
+
+        with patch("forge_core.env._df_free_gb", return_value=5.0), \
+             patch("forge_core.env._safe_run", side_effect=fake_safe_run):
             res = fenv.ensure_swap("/tmp/test_swap", size_gb=4)
-            self.assertFalse(res)
+        self.assertFalse(res)
 
 
 if __name__ == "__main__":
