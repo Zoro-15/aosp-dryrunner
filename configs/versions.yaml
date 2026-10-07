@@ -24,7 +24,7 @@
     - libncurses5-dev
     - libncursesw5-dev
   env: { LC_ALL: "C" }
-  swap_gb: 4
+  swap_gb: 8
   sync_jobs: 8
   expected_source_gb: 35
   cold_hours_4vcpu: 12          # planning number for the slice estimator
@@ -48,7 +48,7 @@
     - libncurses5-dev
     - libncursesw5-dev
   env: { LC_ALL: "C" }
-  swap_gb: 4
+  swap_gb: 8
   sync_jobs: 8
   expected_source_gb: 40
   cold_hours_4vcpu: 14
@@ -71,7 +71,7 @@
     - libncurses5-dev
     - libncursesw5-dev
   env: { LC_ALL: "C" }
-  swap_gb: 4
+  swap_gb: 8
   sync_jobs: 8
   expected_source_gb: 45
   cold_hours_4vcpu: 16
@@ -93,7 +93,7 @@
     - zlib1g-dev
     - libncursesw5-dev
   env: { LC_ALL: "C" }
-  swap_gb: 4
+  swap_gb: 8
   sync_jobs: 8
   expected_source_gb: 55
   cold_hours_4vcpu: 20
@@ -113,7 +113,7 @@
     - build-essential
     - python-is-python3
   env: { LC_ALL: "C" }
-  swap_gb: 4
+  swap_gb: 8
   sync_jobs: 8
   expected_source_gb: 60
   cold_hours_4vcpu: 24
@@ -133,7 +133,7 @@
     - build-essential
     - python-is-python3
   env: { LC_ALL: "C" }
-  swap_gb: 4
+  swap_gb: 8
   sync_jobs: 8
   expected_source_gb: 65
   cold_hours_4vcpu: 28
@@ -153,7 +153,7 @@
     - build-essential
     - python-is-python3
   env: { LC_ALL: "C" }
-  swap_gb: 6
+  swap_gb: 8
   sync_jobs: 8
   expected_source_gb: 70
   cold_hours_4vcpu: 32
