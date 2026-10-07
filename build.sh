@@ -46,10 +46,8 @@ rm -rf hardware/qcom-caf/sdm660 hardware/qcom-caf/msm8998
 rm -rf device/qcom/sepolicy-legacy-um hardware/lineage/compat
 
 # 3. Base Manifest initialization & Local Manifest deployment
-echo "--> Initializing LineageOS 23.2 base manifest (lean mode)..."
-repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 \
-    --git-lfs --depth=1 \
-    -g default,-darwin,-windows,-cts,-vts,-test
+echo "--> Initializing LineageOS 23.2 base manifest..."
+repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --git-lfs --depth=1
 
 echo "--> Deploying PL2 local manifest..."
 mkdir -p .repo/local_manifests
@@ -59,15 +57,9 @@ elif [ -n "$ORIGIN_DIR" ] && [ -f "$ORIGIN_DIR/manifests/PL2.xml" ]; then
     cp "$ORIGIN_DIR/manifests/PL2.xml" .repo/local_manifests/PL2.xml
 fi
 
-# 4. Sync source repositories (optimized bandwidth & storage)
+# 4. Sync source repositories
 echo "--> Syncing source repositories..."
-set +e
-if [ -f "/opt/crave/resync.sh" ]; then
-    /opt/crave/resync.sh
-else
-    repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --current-branch --force-remove-dirty
-fi
-set -e
+repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags --current-branch --force-remove-dirty
 
 # 5. Fallback clones (ensure all 10 trees exist)
 echo "--> Verifying device and hardware trees..."
@@ -81,10 +73,6 @@ echo "--> Verifying device and hardware trees..."
 [ ! -d "hardware/qcom-caf/sdm660/media" ] && git clone --depth=1 -b lineage-23.2-caf-msm8953 https://github.com/Zoro-15/android_hardware_qcom_media.git hardware/qcom-caf/sdm660/media
 [ ! -d "device/qcom/sepolicy-legacy-um" ] && git clone --depth=1 -b lineage-23.2 https://github.com/Zoro-15/android_device_qcom_sepolicy.git device/qcom/sepolicy-legacy-um
 [ ! -d "hardware/lineage/compat" ] && git clone --depth=1 -b lineage-23.2 https://github.com/log1cs/android_hardware_lineage_compat.git hardware/lineage/compat
-
-# 5b. Post-sync storage reclamation (Purge .repo git caches: frees ~20 GB)
-echo "--> Reclaiming storage: purging .repo/ packfiles..."
-rm -rf .repo/
 
 # 6. Soong namespaces setup
 mkdir -p hardware/qcom-caf/sdm660 hardware/qcom-caf/msm8998
@@ -107,6 +95,11 @@ elif [ -x "prebuilts/misc/linux-x86/ccache/ccache" ]; then
 fi
 
 # 8. Environment Setup & Lunch Target
+if [ ! -f "build/envsetup.sh" ]; then
+    echo "[FATAL] build/envsetup.sh not found. Source sync may have failed."
+    exit 1
+fi
+
 source build/envsetup.sh
 if lunch lineage_PL2-ap4a-userdebug 2>/dev/null; then
     echo "--> Selected lunch target: lineage_PL2-ap4a-userdebug"
