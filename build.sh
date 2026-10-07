@@ -7,12 +7,22 @@ set -e
 TARGET="${1:-nothing}"
 CLEAN="${2:-false}"
 START_TIME=$(date +%s)
+ORIGIN_DIR=""
 
 echo "====================================================================="
 echo " LineageOS 23.2 Fast Error-Probing Runner — Nokia 6.1 (PL2)"
 echo " Target : $TARGET"
 echo " Clean  : $CLEAN"
 echo "====================================================================="
+
+# 0. Transparent BTRFS Storage Redirection (if present)
+if [ -d "/mnt/android" ]; then
+    echo "--> Transparent BTRFS compressed volume detected (/mnt/android)."
+    ORIGIN_DIR="$(pwd)"
+    mkdir -p /mnt/android/workspace
+    cp -r manifests /mnt/android/workspace/ 2>/dev/null || true
+    cd /mnt/android/workspace
+fi
 
 # 1. Environment & Memory Guards
 echo "--> Configuring build environment..."
@@ -178,6 +188,14 @@ else
     BUILD_STATUS=${PIPESTATUS[0]}
 fi
 set -e
+
+# Sync artifacts back to origin workspace if redirected
+if [ -n "$ORIGIN_DIR" ]; then
+    cp build_a16_PL2.log "$ORIGIN_DIR/" 2>/dev/null || true
+    mkdir -p "$ORIGIN_DIR/out/target/product/PL2" 2>/dev/null || true
+    cp -r out/target/product/PL2/*.img "$ORIGIN_DIR/out/target/product/PL2/" 2>/dev/null || true
+    cp -r out/target/product/PL2/*.zip "$ORIGIN_DIR/out/target/product/PL2/" 2>/dev/null || true
+fi
 
 # 11. Error Extraction & Reporting
 if [ $BUILD_STATUS -ne 0 ]; then
