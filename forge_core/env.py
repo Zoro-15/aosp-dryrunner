@@ -225,31 +225,52 @@ def protect_runner_processes() -> None:
             pass
 
 
-def ensure_swap(swap_path: str, size_gb: int = 10) -> bool:
-    has = _safe_run(["swapon", "--show"], capture_output=True, text=True)
-    if has and has.stdout.strip():
+def _active_swap_gb() -> float:
+    has = _safe_run(["swapon", "--show=SIZE", "--bytes", "--noheadings"], capture_output=True, text=True)
+    if has is not None and has.returncode == 0:
+        total_bytes = 0
+        for line in (has.stdout or "").strip().splitlines():
+            try:
+                total_bytes += int(line.strip())
+            except ValueError:
+                pass
+        return total_bytes / (1024 * 1024 * 1024)
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("SwapTotal:"):
+                    return float(line.split()[1]) / (1024 * 1024)
+    except Exception:
+        pass
+    return 0.0
+
+
+def ensure_swap(swap_path: str, size_gb: int = 8) -> bool:
+    current = _active_swap_gb()
+    if current >= size_gb:
         protect_runner_processes()
         return True
+    needed_gb = max(1, size_gb - int(current))
     try:
         free = _df_free_gb(os.path.dirname(swap_path))
-        if free < size_gb + 20:
+        if free < needed_gb + 20:
             log.log(f"only {free:.0f} GB free on {os.path.dirname(swap_path)} — "
-                    f"skipping {size_gb}G swap to protect the disk budget")
+                    f"skipping {needed_gb}G swap to protect the disk budget")
             protect_runner_processes()
             return False
     except Exception:
         pass
     # Try fallocate first, fallback to dd
-    _safe_run(["sudo", "fallocate", "-l", f"{size_gb}G", swap_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if not os.path.exists(swap_path) or os.path.getsize(swap_path) < (size_gb * 1024 * 1024 * 1024):
-        _safe_run(["sudo", "dd", "if=/dev/zero", f"of={swap_path}", "bs=1M", f"count={size_gb * 1024}", "status=none"],
+    _safe_run(["sudo", "fallocate", "-l", f"{needed_gb}G", swap_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.exists(swap_path) or os.path.getsize(swap_path) < (needed_gb * 1024 * 1024 * 1024):
+        _safe_run(["sudo", "dd", "if=/dev/zero", f"of={swap_path}", "bs=1M", f"count={needed_gb * 1024}", "status=none"],
                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     _safe_run(["sudo", "chmod", "600", swap_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     _safe_run(["sudo", "mkswap", swap_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     r = _safe_run(["sudo", "swapon", swap_path], capture_output=True, text=True)
     protect_runner_processes()
     if r and r.returncode == 0:
-        log.log(f"swap on: {size_gb} GB at {swap_path}")
+        log.log(f"swap on: +{needed_gb} GB at {swap_path} (target {size_gb} GB)")
         return True
     return False
 
