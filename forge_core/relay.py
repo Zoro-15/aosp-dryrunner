@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import chunker, log
 from . import env as fenv
+from . import storage
 
 # cheap-to-regenerate fat that never travels in the relay
 STATE_EXCLUDES = [
@@ -41,8 +42,36 @@ class RelayError(Exception):
     pass
 
 
+# ---- pre-bank cleanup decision (pure — offline-testable) --------------------
+def pre_bank_actions(free_gb: float, protect_source: bool,
+                     floor_gb: float = 4.0) -> List[str]:
+    """Decide how to make room for banking. Ordered actions.
+
+    The runs #30/#34-#36 deadlock was this function (in spirit): free < 15
+    -> delete the source tree -> next slot re-downloads 35 GiB -> builds 30
+    s -> hits the floor again -> repeat forever. Volume mode ('protect_
+    source=True') must NEVER take the delete-source action — space comes
+    from fstrim + the reclaim ladder inside out/ instead, and if that is
+    not enough the slice is classified 'capacity' and the conveyor stops
+    the campaign honestly.
+    """
+    acts = ["purge-tmp"]
+    if free_gb < floor_gb:
+        acts.append("reclaim-ladder")
+        if free_gb < floor_gb / 2:
+            acts.append("fstrim")
+    if free_gb < 2.0:
+        if protect_source:
+            acts.append("stop:capacity")   # NEVER delete source in volume mode
+        else:
+            acts.append("delete-source")   # degraded/plain last resort
+    return acts
+
+
 def pre_bank_cleanup(build_root: Path) -> None:
-    """Free disk space before packing out/ so split --filter never hits ENOSPC."""
+    """Free disk space before packing out/ so split --filter never hits
+    ENOSPC. Volume mode: fstrim + ladder only — the source tree is sacred
+    (deleting it is the storage-deadlock, not a remedy)."""
     for tmp in ("/tmp", "/var/tmp"):
         try:
             for child in Path(tmp).glob("*"):
@@ -51,17 +80,34 @@ def pre_bank_cleanup(build_root: Path) -> None:
         except Exception:
             pass
     try:
+        vol_root = storage.active_build_root()
+        protect = bool(vol_root) and str(build_root).startswith(vol_root)
         free = fenv._df_free_gb(str(build_root))
-        if free < 15.0:
-            # Drop source files from build_root (everything except out/) to free ~21GB
+        acts = pre_bank_actions(free, protect)
+        if "reclaim-ladder" in acts:
+            fenv.reclaim_ladder(build_root, want_gb=8.0)
+        if "fstrim" in acts or protect:
+            # volume mode always trims before a bank: deletes from this
+            # slice + the ladder punch holes in the sparse image, giving
+            # the backing mount its bytes back for the next slice's stream
+            storage.trim()
+        if "delete-source" in acts:
+            log.warn("DEGRADED (plain) mode: pre-bank cleanup must drop the "
+                     "source tree — expect a re-download next slot. Fix the "
+                     "volume (see storage.py) to stop this.")
             for child in build_root.iterdir():
                 if child.name != "out":
                     if child.is_dir():
                         shutil.rmtree(child, ignore_errors=True)
                     else:
                         child.unlink(missing_ok=True)
-            log.ok(f"pre-bank cleanup freed workspace to {fenv._df_free_gb(str(build_root)):.1f} GB")
-    except Exception:
+            log.ok(f"pre-bank cleanup freed workspace to "
+                   f"{fenv._df_free_gb(str(build_root)):.1f} GB")
+        if "stop:capacity" in acts:
+            log.warn("volume out of space before banking — continuing "
+                     "(streaming sink needs no staging); the engine's "
+                     "capacity classification will stop re-dispatch")
+    except Exception:  # noqa: BLE001 — cleanup must never break banking
         pass
 
 
