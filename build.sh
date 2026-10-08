@@ -7,18 +7,39 @@ set -e
 TARGET="${1:-nothing}"
 CLEAN="${2:-false}"
 START_TIME=$(date +%s)
-ORIGIN_DIR=""
+ORIGIN_DIR="$(pwd)"
 
 echo "====================================================================="
 echo " LineageOS 23.2 Fast Error-Probing Runner — Nokia 6.1 (PL2)"
 echo " Target : $TARGET"
 echo " Clean  : $CLEAN"
+echo " Origin : $ORIGIN_DIR"
 echo "====================================================================="
+
+# Global Exit Trap: Guaranteed log & artifact preservation even on early exit/crash
+cleanup_and_export_logs() {
+    local EXIT_CODE=$?
+    echo ""
+    echo "====================================================================="
+    echo " [STATUS] Process exiting with status: $EXIT_CODE"
+    echo "--> Syncing logs and artifacts back to runner workspace ($ORIGIN_DIR)..."
+    echo "====================================================================="
+    if [ -n "$ORIGIN_DIR" ] && [ -d "$ORIGIN_DIR" ]; then
+        [ -f "build_a16_PL2.log" ] && cp -f build_a16_PL2.log "$ORIGIN_DIR/" 2>/dev/null || true
+        [ -f "sync.log" ] && cp -f sync.log "$ORIGIN_DIR/" 2>/dev/null || true
+        mkdir -p "$ORIGIN_DIR/out" 2>/dev/null || true
+        [ -f "out/error.log" ] && cp -f out/error.log "$ORIGIN_DIR/out/" 2>/dev/null || true
+        [ -f "out/soong.log" ] && cp -f out/soong.log "$ORIGIN_DIR/out/" 2>/dev/null || true
+        mkdir -p "$ORIGIN_DIR/out/target/product/PL2" 2>/dev/null || true
+        cp -f out/target/product/PL2/*.img "$ORIGIN_DIR/out/target/product/PL2/" 2>/dev/null || true
+        cp -f out/target/product/PL2/*.zip "$ORIGIN_DIR/out/target/product/PL2/" 2>/dev/null || true
+    fi
+}
+trap cleanup_and_export_logs EXIT INT TERM ERR
 
 # 0. Transparent BTRFS Storage Redirection (if present)
 if [ -d "/mnt/android" ]; then
     echo "--> Transparent BTRFS compressed volume detected (/mnt/android)."
-    ORIGIN_DIR="$(pwd)"
     mkdir -p /mnt/android/workspace
     cp -r manifests /mnt/android/workspace/ 2>/dev/null || true
     cd /mnt/android/workspace
@@ -46,8 +67,10 @@ rm -rf hardware/qcom-caf/sdm660 hardware/qcom-caf/msm8998
 rm -rf device/qcom/sepolicy-legacy-um hardware/lineage/compat
 
 # 3. Base Manifest initialization & Local Manifest deployment
-echo "--> Initializing LineageOS 23.2 base manifest..."
-repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --git-lfs --depth=1
+echo "--> Initializing LineageOS 23.2 base manifest (lean profile)..."
+repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 \
+    --git-lfs --depth=1 \
+    -g default,-notdefault,-darwin,-cts,-tests,-sample,-apps,-translation
 
 echo "--> Deploying PL2 local manifest..."
 mkdir -p .repo/local_manifests
@@ -59,7 +82,7 @@ fi
 
 # 4. Sync source repositories
 echo "--> Syncing source repositories..."
-repo sync -c -j4 --force-sync --no-clone-bundle --no-tags --current-branch --force-remove-dirty
+repo sync -c -j4 --force-sync --no-clone-bundle --no-tags --current-branch --force-remove-dirty 2>&1 | tee sync.log
 
 # 5. Fallback clones (ensure all 10 trees exist)
 echo "--> Verifying device and hardware trees..."
@@ -113,10 +136,13 @@ if lunch lineage_PL2-ap4a-userdebug 2>/dev/null; then
     echo "--> Selected lunch target: lineage_PL2-ap4a-userdebug"
 elif lunch lineage_PL2-bp1a-userdebug 2>/dev/null; then
     echo "--> Selected lunch target: lineage_PL2-bp1a-userdebug"
-elif lunch lineage_PL2-userdebug; then
+elif lunch lineage_PL2-trunk_staging-userdebug 2>/dev/null; then
+    echo "--> Selected lunch target: lineage_PL2-trunk_staging-userdebug"
+elif lunch lineage_PL2-userdebug 2>/dev/null; then
     echo "--> Selected lunch target: lineage_PL2-userdebug"
 else
-    echo "[FATAL] Lunch failed!"
+    echo "[FATAL] Lunch failed! Listing available targets..."
+    print_lunch_menu 2>/dev/null || true
     exit 1
 fi
 
@@ -176,21 +202,13 @@ else
 fi
 set -e
 
-# Sync artifacts back to origin workspace if redirected
-if [ -n "$ORIGIN_DIR" ]; then
-    cp build_a16_PL2.log "$ORIGIN_DIR/" 2>/dev/null || true
-    mkdir -p "$ORIGIN_DIR/out/target/product/PL2" 2>/dev/null || true
-    cp -r out/target/product/PL2/*.img "$ORIGIN_DIR/out/target/product/PL2/" 2>/dev/null || true
-    cp -r out/target/product/PL2/*.zip "$ORIGIN_DIR/out/target/product/PL2/" 2>/dev/null || true
-fi
-
 # 11. Error Extraction & Reporting
 if [ $BUILD_STATUS -ne 0 ]; then
     echo ""
     echo "====================================================================="
     echo " [!] BUILD FAILED (Exit Code: $BUILD_STATUS) — ERROR EXTRACTION"
     echo "====================================================================="
-    grep -E -A 2 -B 1 "FAILED:|error:|fatal error:|ninja: error:|neverallow" build_a16_PL2.log | tail -n 50 || true
+    grep -E -A 2 -B 1 "FAILED:|error:|fatal error:|ninja: error:|neverallow|unresolved" build_a16_PL2.log | tail -n 60 || true
     echo "====================================================================="
     echo " Full log saved in: build_a16_PL2.log"
     echo "====================================================================="
@@ -216,3 +234,4 @@ fi
 END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
 echo "=== Elapsed Time: $((ELAPSED / 60))m $((ELAPSED % 60))s ==="
+

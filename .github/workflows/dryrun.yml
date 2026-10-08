@@ -110,8 +110,11 @@ jobs:
           name: "logs-${{ matrix.probe_target }}"
           path: |
             build_a16_PL2.log
+            sync.log
             out/error.log
+            out/soong.log
           retention-days: 7
+          if-no-files-found: warn
 
       - name: "Upload Kernel Boot Image"
         if: success() && matrix.probe_target == 'bootimage'
@@ -204,8 +207,11 @@ jobs:
           name: "logs-${{ github.event.inputs.target }}"
           path: |
             build_a16_PL2.log
+            sync.log
             out/error.log
+            out/soong.log
           retention-days: 7
+          if-no-files-found: warn
 
       - name: "Upload Boot Image"
         if: success() && (github.event.inputs.target == 'bootimage' || github.event.inputs.target == 'all-sequential' || github.event.inputs.target == 'bacon')
